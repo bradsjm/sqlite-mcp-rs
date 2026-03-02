@@ -6,6 +6,7 @@ This document defines the stable MCP tool surface for `sqlite-mcp-rs`.
 
 - `db_open`
 - `db_list`
+- `db_close`
 - `sql_query`
 - `sql_execute`
 - `sql_batch`
@@ -88,7 +89,29 @@ Success `data` shape:
 Behavior:
 
 - `persisted` is discovered from files under `SQLITE_PERSIST_ROOT` when configured.
-- Persisted listing is capped by `SQLITE_MAX_ROWS`; overflow sets `persisted_truncated=true`.
+- Persisted listing is capped by `SQLITE_MAX_PERSISTED_LIST_ENTRIES`; overflow sets `persisted_truncated=true`.
+
+## `db_close`
+
+Description: close an open SQLite database handle.
+
+Input:
+
+- `db_id?: string` (default: currently active db handle)
+
+Success `data` shape:
+
+- `db_id: string`
+- `closed: boolean` (always `true` on success)
+- `active_db_id: string`
+
+Behavior:
+
+- Closing a handle invalidates all query cursors scoped to that `db_id`.
+- If the closed handle was active, active handle is reassigned deterministically:
+  - prefer `default` if still open
+  - otherwise lexicographically smallest remaining handle
+  - if no handles remain, active id becomes `default`.
 
 ## `sql_query`
 
@@ -183,7 +206,7 @@ Success `data` shape:
 `SqlBatchResult`:
 
 - `index: number`
-- `kind: "query" | "execute"`
+- `kind: "execute"`
 - `rows_affected: number`
 - `last_insert_rowid?: number`
 
@@ -192,8 +215,10 @@ Validation and enforcement:
 - At least one statement is required.
 - `statements.len()` must be `<= SQLITE_MAX_STATEMENTS`.
 - Every statement must be non-empty and contain exactly one SQL statement.
+- Every statement must be non-read (write-only batch).
 - SQL length per statement must be `<= SQLITE_MAX_SQL_LENGTH`.
 - Blocked SQL (`ATTACH`, `LOAD_EXTENSION(...)`) is rejected.
+- Writes to `_vector_collections` are rejected.
 - Destructive batch guard:
   - `DROP ...`
   - `TRUNCATE ...`
@@ -390,6 +415,7 @@ Runtime configuration keys:
 - `SQLITE_MAX_ROWS`
 - `SQLITE_MAX_BYTES`
 - `SQLITE_MAX_DB_BYTES`
+- `SQLITE_MAX_PERSISTED_LIST_ENTRIES`
 - `SQLITE_CURSOR_TTL_SECONDS`
 - `SQLITE_CURSOR_CAPACITY`
 

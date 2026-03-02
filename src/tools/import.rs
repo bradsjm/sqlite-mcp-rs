@@ -57,6 +57,11 @@ pub fn db_import(
             "import payload does not contain rows".to_string(),
         ));
     }
+    if columns.is_empty() {
+        return Err(AppError::InvalidInput(
+            "import requires at least one column".to_string(),
+        ));
+    }
     if rows.len() > policy.max_rows {
         return Err(AppError::LimitExceeded(format!(
             "import row count exceeds max_rows ({})",
@@ -74,7 +79,7 @@ pub fn db_import(
 
     connection.execute_batch("BEGIN IMMEDIATE TRANSACTION")?;
     if request.truncate_first {
-        let truncate_sql = format!("DELETE FROM {}", request.table);
+        let truncate_sql = format!("DELETE FROM {}", quote_identifier(&request.table));
         if let Err(error) = connection.execute(&truncate_sql, []) {
             let _ = connection.execute_batch("ROLLBACK");
             return Err(error.into());
@@ -249,12 +254,24 @@ fn build_insert_sql(
         ImportConflictMode::Replace => "INSERT OR REPLACE INTO",
     };
 
-    let column_list = columns.join(", ");
+    let quoted_table = quote_identifier(table);
+    let column_list = columns
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
     let placeholders = std::iter::repeat_n("?", columns.len())
         .collect::<Vec<_>>()
         .join(", ");
 
-    format!("{conflict} {table} ({column_list}) VALUES ({placeholders})",)
+    format!(
+        "{conflict} {quoted_table} ({column_list}) VALUES ({placeholders})",
+    )
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    let escaped = identifier.replace('"', "\"\"");
+    format!("\"{escaped}\"")
 }
 
 fn estimate_payload_bytes(value: &ImportPayload) -> AppResult<usize> {
