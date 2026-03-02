@@ -107,6 +107,11 @@ pub fn contains_blocked_sql(sql: &str) -> bool {
     })
 }
 
+pub fn contains_protected_table_reference(sql: &str, table: &str) -> bool {
+    let normalized = normalize_sql_outside_literals(sql);
+    contains_identifier_token(&normalized, &table.to_ascii_uppercase())
+}
+
 pub fn looks_destructive_batch(statements: &[BatchStatement]) -> bool {
     statements.iter().any(|statement| {
         let normalized = statement.sql.trim().to_ascii_uppercase();
@@ -264,6 +269,37 @@ fn contains_load_extension_call(sql: &str) -> bool {
     false
 }
 
+fn contains_identifier_token(sql: &str, token: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let token_bytes = token.as_bytes();
+    let mut index = 0usize;
+
+    while index + token_bytes.len() <= bytes.len() {
+        if &bytes[index..index + token_bytes.len()] == token_bytes {
+            let before_ok = if index == 0 {
+                true
+            } else {
+                !is_identifier_char(bytes[index - 1] as char)
+            };
+
+            let after = index + token_bytes.len();
+            let after_ok = if after >= bytes.len() {
+                true
+            } else {
+                !is_identifier_char(bytes[after] as char)
+            };
+
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+
+        index += 1;
+    }
+
+    false
+}
+
 fn is_identifier_char(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
@@ -273,7 +309,8 @@ mod tests {
     use crate::contracts::sql::BatchStatement;
 
     use super::{
-        contains_blocked_sql, is_valid_identifier, looks_destructive_batch, split_sql_statements,
+        contains_blocked_sql, contains_protected_table_reference, is_valid_identifier,
+        looks_destructive_batch, split_sql_statements,
     };
 
     #[test]
@@ -312,5 +349,17 @@ mod tests {
         assert!(!is_valid_identifier(""));
         assert!(!is_valid_identifier("1users"));
         assert!(!is_valid_identifier("drop table"));
+    }
+
+    #[test]
+    fn detects_protected_table_reference_outside_literals() {
+        assert!(contains_protected_table_reference(
+            "update _vector_collections set last_updated = current_timestamp",
+            "_vector_collections"
+        ));
+        assert!(!contains_protected_table_reference(
+            "select '_vector_collections'",
+            "_vector_collections"
+        ));
     }
 }

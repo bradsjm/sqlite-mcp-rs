@@ -2,11 +2,10 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
-use rusqlite::Statement;
 use rusqlite::types::{Value as SqlValue, ValueRef};
-use serde_json::{Map, Value, json};
+use rusqlite::Statement;
+use serde_json::{json, Map, Value};
 
-use crate::DEFAULT_DB_ID;
 use crate::contracts::common::{ToolEnvelope, ToolHint};
 use crate::contracts::sql::{
     BatchResultKind, SqlBatchData, SqlBatchRequest, SqlBatchResult, SqlExecuteData,
@@ -17,9 +16,11 @@ use crate::db::registry::DbRegistry;
 use crate::errors::{AppError, AppResult};
 use crate::pagination::cursor_store::{CursorState, CursorStore};
 use crate::policy::{
-    SqlPolicy, contains_blocked_sql, looks_destructive_batch, split_sql_statements,
+    contains_blocked_sql, contains_protected_table_reference, looks_destructive_batch,
+    split_sql_statements, SqlPolicy,
 };
 use crate::server::finalize::finalize_tool;
+use crate::DEFAULT_DB_ID;
 
 pub fn sql_query(
     registry: &DbRegistry,
@@ -172,6 +173,12 @@ pub fn sql_execute(
             "sql_execute requires exactly one SQL statement".to_string(),
         ));
     }
+    if contains_protected_table_reference(&request.sql, "_vector_collections") {
+        return Err(AppError::PreconditionRequired(
+            "writes to protected table _vector_collections are not allowed in sql_execute"
+                .to_string(),
+        ));
+    }
 
     let connection = registry.get_connection(Some(&db_id))?;
     let persisted_path = registry.persisted_path(Some(&db_id))?;
@@ -184,12 +191,7 @@ pub fn sql_execute(
 
     bind_params(&mut statement, request.params.as_ref())?;
     let rows_affected = statement.raw_execute()?;
-    let last_insert_rowid = if request
-        .sql
-        .trim_start()
-        .to_ascii_uppercase()
-        .starts_with("INSERT")
-    {
+    let last_insert_rowid = if statement_is_insert(&request.sql) {
         Some(connection.last_insert_rowid())
     } else {
         None
@@ -237,7 +239,15 @@ pub fn sql_batch(
 
     let connection = registry.get_connection(Some(&db_id))?;
     let persisted_path = registry.persisted_path(Some(&db_id))?;
-    if request.transaction == crate::contracts::sql::BatchTransactionMode::Required {
+    let started_transaction =
+        request.transaction == crate::contracts::sql::BatchTransactionMode::Required;
+    if started_transaction && !connection.is_autocommit() {
+        return Err(AppError::PreconditionRequired(
+            "sql_batch transaction=required cannot run inside an active transaction".to_string(),
+        ));
+    }
+
+    if started_transaction {
         connection.execute_batch("BEGIN IMMEDIATE TRANSACTION")?;
     }
 
@@ -245,84 +255,77 @@ pub fn sql_batch(
     for (index, statement_request) in request.statements.iter().enumerate() {
         policy.validate_sql_length(&statement_request.sql)?;
         if statement_request.sql.trim().is_empty() {
-            rollback_if_needed(connection, request.transaction)?;
+            rollback_if_needed(connection, started_transaction)?;
             return Err(AppError::InvalidInput(format!(
                 "statement {index} is empty"
             )));
         }
         if contains_blocked_sql(&statement_request.sql) {
-            rollback_if_needed(connection, request.transaction)?;
+            rollback_if_needed(connection, started_transaction)?;
             return Err(AppError::InvalidInput(format!(
                 "statement {index} contains blocked SQL"
             )));
         }
         if split_sql_statements(&statement_request.sql).len() != 1 {
-            rollback_if_needed(connection, request.transaction)?;
+            rollback_if_needed(connection, started_transaction)?;
             return Err(AppError::InvalidInput(format!(
                 "statement {index} must contain exactly one SQL statement"
+            )));
+        }
+        if contains_protected_table_reference(&statement_request.sql, "_vector_collections") {
+            rollback_if_needed(connection, started_transaction)?;
+            return Err(AppError::PreconditionRequired(format!(
+                "statement {index} writes to protected table _vector_collections"
             )));
         }
 
         let mut statement = match connection.prepare(&statement_request.sql) {
             Ok(statement) => statement,
             Err(error) => {
-                rollback_if_needed(connection, request.transaction)?;
+                rollback_if_needed(connection, started_transaction)?;
                 return Err(error.into());
             }
         };
 
         if let Err(error) = bind_params(&mut statement, statement_request.params.as_ref()) {
-            rollback_if_needed(connection, request.transaction)?;
+            rollback_if_needed(connection, started_transaction)?;
             return Err(error);
         }
 
         if statement.readonly() {
-            let mut row_iter = statement.raw_query();
-            while row_iter.next()?.is_some() {}
-
-            results.push(SqlBatchResult {
-                index,
-                kind: BatchResultKind::Query,
-                rows_affected: 0,
-                last_insert_rowid: None,
-            });
-        } else {
-            let rows_affected = match statement.raw_execute() {
-                Ok(affected) => affected,
-                Err(error) => {
-                    rollback_if_needed(connection, request.transaction)?;
-                    return Err(error.into());
-                }
-            };
-
-            let last_insert_rowid = if statement_request
-                .sql
-                .trim_start()
-                .to_ascii_uppercase()
-                .starts_with("INSERT")
-            {
-                Some(connection.last_insert_rowid())
-            } else {
-                None
-            };
-
-            results.push(SqlBatchResult {
-                index,
-                kind: BatchResultKind::Execute,
-                rows_affected: rows_affected as u64,
-                last_insert_rowid,
-            });
-
-            if let Err(error) =
-                enforce_db_size_limit(persisted_path.as_deref(), policy.max_db_bytes)
-            {
-                rollback_if_needed(connection, request.transaction)?;
-                return Err(error);
+            rollback_if_needed(connection, started_transaction)?;
+            return Err(AppError::InvalidInput(format!(
+                "statement {index} is read-only; sql_batch only supports write statements"
+            )));
+        }
+        let rows_affected = match statement.raw_execute() {
+            Ok(affected) => affected,
+            Err(error) => {
+                rollback_if_needed(connection, started_transaction)?;
+                return Err(error.into());
             }
+        };
+
+        let last_insert_rowid = if statement_is_insert(&statement_request.sql) {
+            Some(connection.last_insert_rowid())
+        } else {
+            None
+        };
+
+        results.push(SqlBatchResult {
+            index,
+            kind: BatchResultKind::Execute,
+            rows_affected: rows_affected as u64,
+            last_insert_rowid,
+        });
+
+        if let Err(error) = enforce_db_size_limit(persisted_path.as_deref(), policy.max_db_bytes) {
+            rollback_if_needed(connection, started_transaction)?;
+            return Err(error);
         }
     }
 
-    if request.transaction == crate::contracts::sql::BatchTransactionMode::Required {
+    if started_transaction {
         connection.execute_batch("COMMIT")?;
     }
 
@@ -342,12 +345,153 @@ pub fn sql_batch(
 
 fn rollback_if_needed(
     connection: &rusqlite::Connection,
-    mode: crate::contracts::sql::BatchTransactionMode,
+    started_transaction: bool,
 ) -> AppResult<()> {
-    if mode == crate::contracts::sql::BatchTransactionMode::Required {
+    if started_transaction {
         connection.execute_batch("ROLLBACK")?;
     }
     Ok(())
+}
+
+fn statement_is_insert(sql: &str) -> bool {
+    let mut index = 0usize;
+    let bytes = sql.as_bytes();
+
+    while index < bytes.len() {
+        while index < bytes.len() && (bytes[index] as char).is_ascii_whitespace() {
+            index += 1;
+        }
+
+        if index + 1 < bytes.len() && bytes[index] == b'-' && bytes[index + 1] == b'-' {
+            index += 2;
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+
+        if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'*' {
+            index += 2;
+            while index + 1 < bytes.len() {
+                if bytes[index] == b'*' && bytes[index + 1] == b'/' {
+                    index += 2;
+                    break;
+                }
+                index += 1;
+            }
+            continue;
+        }
+
+        break;
+    }
+
+    let mut end = index;
+    while end < bytes.len() && (bytes[end] as char).is_ascii_alphabetic() {
+        end += 1;
+    }
+
+    end > index && sql[index..end].eq_ignore_ascii_case("INSERT")
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::contracts::db::DbMode;
+    use crate::contracts::sql::{BatchStatement, BatchTransactionMode, SqlBatchRequest};
+    use crate::db::registry::DbRegistry;
+    use crate::errors::AppError;
+    use crate::policy::SqlPolicy;
+
+    use super::{sql_batch, statement_is_insert};
+
+    fn test_policy() -> SqlPolicy {
+        SqlPolicy {
+            max_sql_length: 20_000,
+            max_statements: 50,
+            max_rows: 500,
+            max_bytes: 1_048_576,
+            max_db_bytes: u64::MAX,
+        }
+    }
+
+    fn setup_registry() -> DbRegistry {
+        let mut registry = DbRegistry::default();
+        registry
+            .open_db("default".to_string(), DbMode::Memory, None, false, None)
+            .expect("memory db should open");
+        let connection = registry
+            .get_connection(Some("default"))
+            .expect("default db handle should exist");
+        connection
+            .execute_batch("create table if not exists t(id integer primary key, v text)")
+            .expect("table create should succeed");
+        registry
+    }
+
+    #[test]
+    fn detects_insert_with_leading_whitespace_and_comments() {
+        assert!(statement_is_insert(
+            "\n  -- leading comment\n /* block */ INSERT INTO t(a) VALUES(1)"
+        ));
+    }
+
+    #[test]
+    fn does_not_match_non_insert_prefixes() {
+        assert!(!statement_is_insert("INSERTED INTO t(a) VALUES(1)"));
+        assert!(!statement_is_insert("UPDATE t SET a = 1"));
+    }
+
+    #[test]
+    fn sql_batch_rejects_read_statement() {
+        let registry = setup_registry();
+        let error = sql_batch(
+            &registry,
+            &test_policy(),
+            SqlBatchRequest {
+                db_id: None,
+                transaction: BatchTransactionMode::None,
+                confirm_destructive: false,
+                statements: vec![BatchStatement {
+                    sql: "select 1".to_string(),
+                    params: None,
+                }],
+            },
+        )
+        .expect_err("read statements must be rejected in sql_batch");
+
+        match error {
+            AppError::InvalidInput(message) => {
+                assert!(message.contains("sql_batch only supports write statements"));
+            }
+            other => panic!("expected invalid input, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn sql_batch_rejects_protected_vector_table_writes() {
+        let registry = setup_registry();
+        let error = sql_batch(
+            &registry,
+            &test_policy(),
+            SqlBatchRequest {
+                db_id: None,
+                transaction: BatchTransactionMode::None,
+                confirm_destructive: false,
+                statements: vec![BatchStatement {
+                    sql: "update _vector_collections set last_updated = current_timestamp"
+                        .to_string(),
+                    params: None,
+                }],
+            },
+        )
+        .expect_err("writes to protected table must be rejected");
+
+        match error {
+            AppError::PreconditionRequired(message) => {
+                assert!(message.contains("_vector_collections"));
+            }
+            other => panic!("expected precondition required, got: {other}"),
+        }
+    }
 }
 
 fn resolve_query_request(
