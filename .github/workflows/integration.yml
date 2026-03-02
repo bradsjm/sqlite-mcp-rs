@@ -23,4 +23,4 @@ jobs:
         run: cargo test --features vector adapters::reranker::tests::downloads_and_uses_real_fastembed_models -- --ignored --exact --nocapture
 
       - name: Run MCP inspector integration tests
-        run: bash scripts/test-sqlite-mcp-inspector.sh cargo run --
+        run: bash scripts/test-sqlite-mcp-inspector.sh cargo run --features vector --

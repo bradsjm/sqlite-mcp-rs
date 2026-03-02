@@ -77,6 +77,8 @@ jobs:
                   context: .
                   file: Dockerfile
                   platforms: linux/amd64
+                  build-args: |
+                      CARGO_FEATURES=vector
                   labels: ${{ needs.meta.outputs.labels }}
                   outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
                   cache-from: type=gha,scope=amd64
@@ -108,6 +110,8 @@ jobs:
                   context: .
                   file: Dockerfile
                   platforms: linux/arm64
+                  build-args: |
+                      CARGO_FEATURES=vector
                   labels: ${{ needs.meta.outputs.labels }}
                   outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
                   cache-from: type=gha,scope=arm64
