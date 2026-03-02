@@ -12,16 +12,9 @@ pub fn usize_schema(_: &mut SchemaGenerator) -> Schema {
 
 pub fn optional_usize_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({
-        "anyOf": [
-            {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": JSON_SAFE_INTEGER_MAX
-            },
-            {
-                "type": "null"
-            }
-        ]
+        "type": "integer",
+        "minimum": 0,
+        "maximum": JSON_SAFE_INTEGER_MAX
     })
 }
 
@@ -30,5 +23,57 @@ pub fn u64_schema(_: &mut SchemaGenerator) -> Schema {
         "type": "integer",
         "minimum": 0,
         "maximum": JSON_SAFE_INTEGER_MAX
+    })
+}
+
+pub fn any_json_value_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "anyOf": [
+            {
+                "type": "object",
+                "additionalProperties": true
+            },
+            {
+                "type": "array",
+                "items": {}
+            },
+            {
+                "type": "string"
+            },
+            {
+                "type": "number"
+            },
+            {
+                "type": "boolean"
+            }
+        ]
+    })
+}
+
+pub fn sql_params_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "anyOf": [
+            {
+                "type": "array"
+            },
+            {
+                "type": "object",
+                "additionalProperties": true
+            }
+        ]
+    })
+}
+
+pub fn import_conflict_mode_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "string",
+        "enum": ["none", "ignore", "replace"]
+    })
+}
+
+pub fn any_object_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "object",
+        "additionalProperties": true
     })
 }

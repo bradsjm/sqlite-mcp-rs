@@ -37,6 +37,7 @@ pub struct DbImportRequest {
     #[schemars(schema_with = "crate::contracts::schema::optional_usize_schema")]
     pub batch_size: Option<usize>,
     #[serde(default)]
+    #[schemars(schema_with = "crate::contracts::schema::import_conflict_mode_schema")]
     pub on_conflict: Option<ImportConflictMode>,
     #[serde(default)]
     pub truncate_first: bool,

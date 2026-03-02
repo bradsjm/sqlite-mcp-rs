@@ -16,6 +16,7 @@ pub struct SqlQueryRequest {
     #[serde(default)]
     pub sql: Option<String>,
     #[serde(default)]
+    #[schemars(schema_with = "crate::contracts::schema::sql_params_schema")]
     pub params: Option<SqlParams>,
     #[serde(default)]
     #[schemars(schema_with = "crate::contracts::schema::optional_usize_schema")]
@@ -44,6 +45,7 @@ pub struct SqlExecuteRequest {
     pub db_id: Option<String>,
     pub sql: String,
     #[serde(default)]
+    #[schemars(schema_with = "crate::contracts::schema::sql_params_schema")]
     pub params: Option<SqlParams>,
 }
 
@@ -66,6 +68,7 @@ pub enum BatchTransactionMode {
 pub struct BatchStatement {
     pub sql: String,
     #[serde(default)]
+    #[schemars(schema_with = "crate::contracts::schema::sql_params_schema")]
     pub params: Option<SqlParams>,
 }
 
