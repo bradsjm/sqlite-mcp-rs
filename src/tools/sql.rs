@@ -393,114 +393,6 @@ fn statement_is_insert(sql: &str) -> bool {
     end > index && sql[index..end].eq_ignore_ascii_case("INSERT")
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::contracts::db::DbMode;
-    use crate::contracts::sql::{BatchStatement, BatchTransactionMode, SqlBatchRequest};
-    use crate::db::registry::DbRegistry;
-    use crate::errors::AppError;
-    use crate::policy::SqlPolicy;
-
-    use super::{sql_batch, statement_is_insert};
-
-    fn test_policy() -> SqlPolicy {
-        SqlPolicy {
-            max_sql_length: 20_000,
-            max_statements: 50,
-            max_rows: 500,
-            max_bytes: 1_048_576,
-            max_db_bytes: u64::MAX,
-        }
-    }
-
-    fn setup_registry() -> DbRegistry {
-        let mut registry = DbRegistry::default();
-        registry
-            .open_db(
-                "default".to_string(),
-                DbMode::Memory,
-                None,
-                false,
-                None,
-                u64::MAX,
-            )
-            .expect("memory db should open");
-        let connection = registry
-            .get_connection(Some("default"))
-            .expect("default db handle should exist");
-        connection
-            .execute_batch("create table if not exists t(id integer primary key, v text)")
-            .expect("table create should succeed");
-        registry
-    }
-
-    #[test]
-    fn detects_insert_with_leading_whitespace_and_comments() {
-        assert!(statement_is_insert(
-            "\n  -- leading comment\n /* block */ INSERT INTO t(a) VALUES(1)"
-        ));
-    }
-
-    #[test]
-    fn does_not_match_non_insert_prefixes() {
-        assert!(!statement_is_insert("INSERTED INTO t(a) VALUES(1)"));
-        assert!(!statement_is_insert("UPDATE t SET a = 1"));
-    }
-
-    #[test]
-    fn sql_batch_rejects_read_statement() {
-        let registry = setup_registry();
-        let error = sql_batch(
-            &registry,
-            &test_policy(),
-            SqlBatchRequest {
-                db_id: None,
-                transaction: BatchTransactionMode::None,
-                confirm_destructive: false,
-                statements: vec![BatchStatement {
-                    sql: "select 1".to_string(),
-                    params: None,
-                }],
-            },
-        )
-        .expect_err("read statements must be rejected in sql_batch");
-
-        match error {
-            AppError::InvalidInput(message) => {
-                assert!(message.contains("sql_batch only supports write statements"));
-            }
-            other => panic!("expected invalid input, got: {other}"),
-        }
-    }
-
-    #[test]
-    fn sql_batch_rejects_protected_vector_table_writes() {
-        let registry = setup_registry();
-        let error = sql_batch(
-            &registry,
-            &test_policy(),
-            SqlBatchRequest {
-                db_id: None,
-                transaction: BatchTransactionMode::None,
-                confirm_destructive: false,
-                statements: vec![BatchStatement {
-                    sql: "update _vector_collections set last_updated = current_timestamp"
-                        .to_string(),
-                    params: None,
-                }],
-            },
-        )
-        .expect_err("writes to protected table must be rejected");
-
-        match error {
-            AppError::PreconditionRequired(message) => {
-                assert!(message.contains("_vector_collections"));
-            }
-            other => panic!("expected precondition required, got: {other}"),
-        }
-    }
-}
-
 fn resolve_query_request(
     cursor_store: &mut CursorStore,
     policy: &SqlPolicy,
@@ -699,4 +591,112 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::contracts::db::DbMode;
+    use crate::contracts::sql::{BatchStatement, BatchTransactionMode, SqlBatchRequest};
+    use crate::db::registry::DbRegistry;
+    use crate::errors::AppError;
+    use crate::policy::SqlPolicy;
+
+    use super::{sql_batch, statement_is_insert};
+
+    fn test_policy() -> SqlPolicy {
+        SqlPolicy {
+            max_sql_length: 20_000,
+            max_statements: 50,
+            max_rows: 500,
+            max_bytes: 1_048_576,
+            max_db_bytes: u64::MAX,
+        }
+    }
+
+    fn setup_registry() -> DbRegistry {
+        let mut registry = DbRegistry::default();
+        registry
+            .open_db(
+                "default".to_string(),
+                DbMode::Memory,
+                None,
+                false,
+                None,
+                u64::MAX,
+            )
+            .expect("memory db should open");
+        let connection = registry
+            .get_connection(Some("default"))
+            .expect("default db handle should exist");
+        connection
+            .execute_batch("create table if not exists t(id integer primary key, v text)")
+            .expect("table create should succeed");
+        registry
+    }
+
+    #[test]
+    fn detects_insert_with_leading_whitespace_and_comments() {
+        assert!(statement_is_insert(
+            "\n  -- leading comment\n /* block */ INSERT INTO t(a) VALUES(1)"
+        ));
+    }
+
+    #[test]
+    fn does_not_match_non_insert_prefixes() {
+        assert!(!statement_is_insert("INSERTED INTO t(a) VALUES(1)"));
+        assert!(!statement_is_insert("UPDATE t SET a = 1"));
+    }
+
+    #[test]
+    fn sql_batch_rejects_read_statement() {
+        let registry = setup_registry();
+        let error = sql_batch(
+            &registry,
+            &test_policy(),
+            SqlBatchRequest {
+                db_id: None,
+                transaction: BatchTransactionMode::None,
+                confirm_destructive: false,
+                statements: vec![BatchStatement {
+                    sql: "select 1".to_string(),
+                    params: None,
+                }],
+            },
+        )
+        .expect_err("read statements must be rejected in sql_batch");
+
+        match error {
+            AppError::InvalidInput(message) => {
+                assert!(message.contains("sql_batch only supports write statements"));
+            }
+            other => panic!("expected invalid input, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn sql_batch_rejects_protected_vector_table_writes() {
+        let registry = setup_registry();
+        let error = sql_batch(
+            &registry,
+            &test_policy(),
+            SqlBatchRequest {
+                db_id: None,
+                transaction: BatchTransactionMode::None,
+                confirm_destructive: false,
+                statements: vec![BatchStatement {
+                    sql: "update _vector_collections set last_updated = current_timestamp"
+                        .to_string(),
+                    params: None,
+                }],
+            },
+        )
+        .expect_err("writes to protected table must be rejected");
+
+        match error {
+            AppError::PreconditionRequired(message) => {
+                assert!(message.contains("_vector_collections"));
+            }
+            other => panic!("expected precondition required, got: {other}"),
+        }
+    }
 }

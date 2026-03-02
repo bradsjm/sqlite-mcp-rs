@@ -1,6 +1,6 @@
 # sqlite-mcp-rs
 
-A bounded Model Context Protocol (MCP) server for SQLite over stdio. It supports both ephemeral in-memory databases and persisted databases, and provides typed tools for database lifecycle, query/execute operations, batch writes, data import, cursor-based pagination, and optional vector search.
+A bounded Model Context Protocol (MCP) server for SQLite with stdio (default) and optional HTTP transport. It supports both ephemeral in-memory databases and persisted databases, and provides typed tools for database lifecycle, query/execute operations, batch writes, data import, cursor-based pagination, and optional vector search.
 
 ## Features
 
@@ -33,9 +33,16 @@ sqlite-mcp-rs
 
 ### Using Docker
 
+Local stdio transport with latest image:
+
 ```bash
-docker pull ghcr.io/bradsjm/sqlite-mcp-rs:latest
 docker run --rm -i --env-file .env ghcr.io/bradsjm/sqlite-mcp-rs:latest
+```
+
+Run over HTTP transport:
+
+```bash
+docker run --rm -i --env-file .env ghcr.io/bradsjm/sqlite-mcp-rs:latest -- --transport http --host localhost --port 3000
 ```
 
 Build locally:
@@ -57,11 +64,17 @@ Or run directly:
 cargo run
 ```
 
+Run over HTTP transport:
+
+```bash
+cargo run -- --transport http --host localhost --port 3000
+```
+
 ## Quick Start
 
 ### Configure MCP
 
-Use this MCP configuration template and set your environment values.
+Use this MCP configuration template and set the **optional** environment value for persisted databases.
 
 ```json
 {
@@ -71,29 +84,26 @@ Use this MCP configuration template and set your environment values.
       "args": ["-y", "@bradsjm/sqlite-mcp-rs@latest"],
       "env": {
         "SQLITE_PERSIST_ROOT": "/absolute/path/to/sqlite-data",
-        "SQLITE_LOG_LEVEL": "info"
       }
     }
   }
 }
 ```
 
-For local development:
+### Transport Options
 
-```json
-{
-  "mcpServers": {
-    "sqlite": {
-      "command": "cargo",
-      "args": ["run", "--manifest-path", "/path/to/sqlite-mcp-rs/Cargo.toml", "--"],
-      "env": {
-        "SQLITE_PERSIST_ROOT": "/absolute/path/to/sqlite-data",
-        "SQLITE_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
+The server supports:
+
+- `--transport stdio` (default)
+- `--transport http --host localhost --port 3000`
+
+When HTTP transport is enabled, expose and connect to:
+
+```text
+http://<host>:<port>/mcp
 ```
+
+HTTP connections are not isolated by session for database handles. All HTTP clients in one server process share the same `SQLITE_PERSIST_ROOT` and the same in-process registry, so they can open and use the same persisted database file at the same time.
 
 ### Core Environment Variables
 
@@ -215,6 +225,12 @@ Run integration checks against MCP Inspector:
 
 ```bash
 bash scripts/test-sqlite-mcp-inspector.sh cargo run --
+```
+
+Run integration checks against MCP Inspector over HTTP transport:
+
+```bash
+bash scripts/test-sqlite-mcp-inspector-http.sh cargo run --
 ```
 
 Show CLI help:

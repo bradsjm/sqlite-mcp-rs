@@ -7,11 +7,11 @@ use rusqlite::Connection;
 #[cfg(feature = "vector")]
 use sqlite_vec::sqlite3_vec_init;
 
-use crate::DEFAULT_DB_ID;
 use crate::contracts::db::{
     DbCloseData, DbListData, DbMode, DbOpenData, DbSummary, ExtensionsLoaded,
 };
 use crate::errors::{AppError, AppResult};
+use crate::DEFAULT_DB_ID;
 
 use super::persistence::{enforce_db_size_limit, list_persisted_entries, resolve_persist_path};
 
@@ -299,6 +299,37 @@ mod tests {
             100_000_000,
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn allows_opening_same_persist_path_with_multiple_db_ids() {
+        let mut registry = DbRegistry::default();
+        let root = Path::new("/tmp/sqlite-mcp-rs-tests");
+
+        let first = registry.open_db(
+            "a".to_string(),
+            DbMode::Persist,
+            Some("shared.db".to_string()),
+            true,
+            Some(root),
+            100_000_000,
+        );
+        assert!(first.is_ok());
+
+        let second = registry.open_db(
+            "b".to_string(),
+            DbMode::Persist,
+            Some("shared.db".to_string()),
+            false,
+            Some(root),
+            100_000_000,
+        );
+        assert!(second.is_ok());
+
+        let listed = registry
+            .list(Some(root), 100)
+            .expect("list should include both db handles");
+        assert_eq!(listed.open.len(), 2);
     }
 
     #[test]
