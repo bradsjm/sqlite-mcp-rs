@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "vector")]
+use std::sync::OnceLock;
 
 use rusqlite::Connection;
+#[cfg(feature = "vector")]
+use sqlite_vec::sqlite3_vec_init;
 
 use crate::DEFAULT_DB_ID;
 use crate::contracts::db::{DbListData, DbMode, DbOpenData, DbSummary, ExtensionsLoaded};
@@ -40,6 +44,9 @@ impl DbRegistry {
         reset: bool,
         persist_root: Option<&Path>,
     ) -> AppResult<DbOpenData> {
+        #[cfg(feature = "vector")]
+        ensure_sqlite_vec_registered()?;
+
         if let Some(existing) = self.handles.get(&db_id) {
             let requested_path = path.clone().map(PathBuf::from);
             if !reset && (existing.mode != mode || existing.path != requested_path) {
@@ -55,11 +62,7 @@ impl DbRegistry {
                     mode,
                     path,
                     active: true,
-                    extensions_loaded: ExtensionsLoaded {
-                        vec: false,
-                        rembed: false,
-                        regex: false,
-                    },
+                    extensions_loaded: extension_flags(&existing.connection),
                 });
             }
         }
@@ -89,6 +92,8 @@ impl DbRegistry {
             }
         };
 
+        let extensions_loaded = extension_flags(&connection);
+
         self.handles.insert(
             db_id.clone(),
             DbHandle {
@@ -104,11 +109,7 @@ impl DbRegistry {
             mode,
             path: resolved_path.map(|path| path.to_string_lossy().to_string()),
             active: true,
-            extensions_loaded: ExtensionsLoaded {
-                vec: false,
-                rembed: false,
-                regex: false,
-            },
+            extensions_loaded,
         })
     }
 
@@ -159,6 +160,57 @@ impl DbRegistry {
             .ok_or_else(|| AppError::NotFound(format!("unknown db_id: {resolved_db_id}")))?;
         Ok(handle.path.clone())
     }
+}
+
+fn extension_flags(connection: &Connection) -> ExtensionsLoaded {
+    let vec_loaded = {
+        #[cfg(feature = "vector")]
+        {
+            connection
+                .query_row("select vec_version()", [], |row| row.get::<_, String>(0))
+                .is_ok()
+        }
+        #[cfg(not(feature = "vector"))]
+        {
+            false
+        }
+    };
+
+    ExtensionsLoaded {
+        vec: vec_loaded,
+        rembed: false,
+        regex: false,
+    }
+}
+
+#[cfg(feature = "vector")]
+fn ensure_sqlite_vec_registered() -> AppResult<()> {
+    static REGISTER_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
+
+    let result = REGISTER_RESULT.get_or_init(|| {
+        type SqliteExtensionEntry = unsafe extern "C" fn(
+            db: *mut rusqlite::ffi::sqlite3,
+            pz_err_msg: *mut *mut std::os::raw::c_char,
+            api: *const rusqlite::ffi::sqlite3_api_routines,
+        ) -> std::os::raw::c_int;
+        let rc = unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                SqliteExtensionEntry,
+            >(sqlite3_vec_init as *const ())))
+        };
+        if rc == rusqlite::ffi::SQLITE_OK {
+            Ok(())
+        } else {
+            Err(format!(
+                "failed to register sqlite-vec auto extension (sqlite rc={rc})"
+            ))
+        }
+    });
+
+    result
+        .clone()
+        .map_err(|message| AppError::Dependency(message.to_string()))
 }
 
 #[cfg(test)]

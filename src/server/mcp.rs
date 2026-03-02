@@ -165,7 +165,9 @@ impl SqliteMcpServer {
     fn map_error(error: AppError) -> McpError {
         let protocol = error.to_protocol_error();
         let code = match protocol.details.code {
-            ErrorCode::Internal => rmcp::model::ErrorCode::INTERNAL_ERROR,
+            ErrorCode::Internal | ErrorCode::SqlError | ErrorCode::DependencyError => {
+                rmcp::model::ErrorCode::INTERNAL_ERROR
+            }
             _ => rmcp::model::ErrorCode::INVALID_PARAMS,
         };
 
@@ -378,6 +380,7 @@ impl SqliteMcpServer {
         let registry = self.registry.lock().await;
         let response = match tools::vector::vector_collection_create(
             &registry,
+            &self.vector_runtime,
             request,
             self.config.max_db_bytes,
         ) {
@@ -507,8 +510,13 @@ impl SqliteMcpServer {
             .clone()
             .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
         let registry = self.registry.lock().await;
-        let response = match tools::vector::vector_search(&registry, &self.vector_runtime, request)
-        {
+        let response = match tools::vector::vector_search(
+            &registry,
+            &self.vector_runtime,
+            request,
+            self.config.max_vector_top_k,
+            self.config.max_rerank_fetch_k,
+        ) {
             Ok(response) => response,
             Err(error) => {
                 Self::log_tool_error("vector_search", &resolved_db_id, started_at, &error);

@@ -248,7 +248,6 @@ Input:
 
 - `db_id?: string` (default `"default"`)
 - `collection: string` (must match `^[A-Za-z_][A-Za-z0-9_]*$`)
-- `dimension: number` (must be `> 0`)
 - `if_not_exists?: boolean` (default `false`)
 
 Success `data` shape:
@@ -356,8 +355,8 @@ Success `data` shape:
 
 Behavior:
 
-- Base ranking uses cosine distance.
-- Rows with malformed embeddings or dimension mismatch are skipped.
+- Base ranking is produced by sqlite-vec KNN (`vec0`) using query embedding distance.
+- Optional metadata filtering is applied after initial KNN candidate retrieval.
 - `rerank="on"` without configured reranker does not fail the tool; it returns `issues` with `RERANK_UNAVAILABLE` and falls back to distance ranking.
 - Reranker runtime failures do not fail the tool; it returns `issues` with `RERANK_FAILED` and falls back to distance ranking.
 
@@ -396,10 +395,9 @@ Runtime configuration keys:
 
 Vector feature keys (required when `vector` is enabled unless noted):
 
-- `SQLITE_EMBEDDING_PROVIDER` (`builtin`)
-- `SQLITE_EMBEDDING_MODEL`
-- `SQLITE_EMBEDDING_ENDPOINT` (optional)
-- `SQLITE_EMBEDDING_SIZE`
+- `SQLITE_EMBEDDING_PROVIDER` (optional; default `fastembed`)
+- `SQLITE_EMBEDDING_MODEL` (optional; default `BAAI/bge-small-en-v1.5`)
+- `SQLITE_EMBEDDING_CACHE_DIR` (optional; if unset, fastembed uses Hugging Face cache env/defaults)
 - `SQLITE_RERANKER_PROVIDER` (optional, but required if any reranker key is set; `builtin`)
 - `SQLITE_RERANKER_MODEL` (optional, but required if reranker is configured)
 - `SQLITE_RERANKER_ENDPOINT` (optional)

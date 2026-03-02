@@ -7,7 +7,6 @@ pub struct VectorCollectionCreateRequest {
     #[serde(default)]
     pub db_id: Option<String>,
     pub collection: String,
-    pub dimension: usize,
     #[serde(default)]
     pub if_not_exists: bool,
 }

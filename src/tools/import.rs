@@ -39,6 +39,9 @@ pub fn db_import(
             "batch_size must be greater than zero".to_string(),
         ));
     }
+    let effective_batch_size = request
+        .batch_size
+        .unwrap_or(rows_batch_default(policy.max_rows));
 
     let payload_bytes = estimate_payload_bytes(&request.data)?;
     if payload_bytes > policy.max_bytes {
@@ -81,7 +84,7 @@ pub fn db_import(
     let mut inserted = 0usize;
     let mut skipped = 0usize;
     let sql = build_insert_sql(&request.table, &columns, request.on_conflict);
-    for row in &rows {
+    for (index, row) in rows.iter().enumerate() {
         let values = row
             .iter()
             .map(json_to_sql_value)
@@ -99,6 +102,14 @@ pub fn db_import(
                 let _ = connection.execute_batch("ROLLBACK");
                 return Err(error.into());
             }
+        }
+
+        if (index + 1) % effective_batch_size == 0
+            && let Err(error) =
+                enforce_db_size_limit(persisted_path.as_deref(), policy.max_db_bytes)
+        {
+            let _ = connection.execute_batch("ROLLBACK");
+            return Err(error);
         }
     }
 
@@ -271,4 +282,8 @@ fn json_to_sql_value(value: &Value) -> AppResult<SqlValue> {
         Value::Array(_) | Value::Object(_) => SqlValue::Text(value.to_string()),
     };
     Ok(converted)
+}
+
+fn rows_batch_default(max_rows: usize) -> usize {
+    max_rows.clamp(1, 1000)
 }

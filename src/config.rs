@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 
 use crate::errors::AppError;
+#[cfg(feature = "vector")]
+use fastembed::RerankerModel;
+#[cfg(feature = "vector")]
+use fastembed::{EmbeddingModel, ModelTrait};
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -14,6 +18,10 @@ pub struct AppConfig {
     pub cursor_ttl_seconds: u64,
     pub cursor_capacity: usize,
     #[cfg(feature = "vector")]
+    pub max_vector_top_k: usize,
+    #[cfg(feature = "vector")]
+    pub max_rerank_fetch_k: usize,
+    #[cfg(feature = "vector")]
     pub embedding: EmbeddingConfig,
     #[cfg(feature = "vector")]
     pub reranker: Option<RerankerConfig>,
@@ -24,14 +32,14 @@ pub struct AppConfig {
 pub struct EmbeddingConfig {
     pub provider: EmbeddingProvider,
     pub model: String,
-    pub endpoint: Option<String>,
-    pub size: usize,
+    pub cache_dir: Option<PathBuf>,
+    pub dimension: usize,
 }
 
 #[cfg(feature = "vector")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingProvider {
-    Builtin,
+    Fastembed,
 }
 
 #[cfg(feature = "vector")]
@@ -39,14 +47,13 @@ pub enum EmbeddingProvider {
 pub struct RerankerConfig {
     pub provider: RerankerProvider,
     pub model: String,
-    pub endpoint: Option<String>,
-    pub timeout_ms: u64,
+    pub cache_dir: Option<PathBuf>,
 }
 
 #[cfg(feature = "vector")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RerankerProvider {
-    Builtin,
+    Fastembed,
 }
 
 impl AppConfig {
@@ -68,6 +75,10 @@ impl AppConfig {
             max_db_bytes: positive_u64(&lookup, "SQLITE_MAX_DB_BYTES", 100_000_000)?,
             cursor_ttl_seconds: positive_u64(&lookup, "SQLITE_CURSOR_TTL_SECONDS", 600)?,
             cursor_capacity: positive_usize(&lookup, "SQLITE_CURSOR_CAPACITY", 500)?,
+            #[cfg(feature = "vector")]
+            max_vector_top_k: positive_usize(&lookup, "SQLITE_MAX_VECTOR_TOP_K", 200)?,
+            #[cfg(feature = "vector")]
+            max_rerank_fetch_k: positive_usize(&lookup, "SQLITE_MAX_RERANK_FETCH_K", 500)?,
             #[cfg(feature = "vector")]
             embedding: embedding_config(&lookup)?,
             #[cfg(feature = "vector")]
@@ -95,22 +106,42 @@ fn embedding_config<F>(lookup: &F) -> Result<EmbeddingConfig, AppError>
 where
     F: Fn(&str) -> Option<String>,
 {
-    let provider = required_string(lookup, "SQLITE_EMBEDDING_PROVIDER")?;
+    let provider = optional_non_empty_string(lookup, "SQLITE_EMBEDDING_PROVIDER")
+        .unwrap_or_else(|| "fastembed".to_string());
     let provider = match provider.as_str() {
-        "builtin" => EmbeddingProvider::Builtin,
+        "fastembed" => EmbeddingProvider::Fastembed,
         _ => {
             return Err(AppError::InvalidInput(
-                "SQLITE_EMBEDDING_PROVIDER must be one of: builtin".to_string(),
+                "SQLITE_EMBEDDING_PROVIDER must be one of: fastembed".to_string(),
             ));
         }
     };
 
+    let model = optional_non_empty_string(lookup, "SQLITE_EMBEDDING_MODEL")
+        .unwrap_or_else(|| "BAAI/bge-small-en-v1.5".to_string());
+    let parsed_model = parse_embedding_model(&model)?;
+    let dimension = EmbeddingModel::get_model_info(&parsed_model)
+        .map(|info| info.dim)
+        .ok_or_else(|| AppError::InvalidInput(format!("unsupported embedding model: {model}")))?;
+
     Ok(EmbeddingConfig {
         provider,
-        model: required_string(lookup, "SQLITE_EMBEDDING_MODEL")?,
-        endpoint: optional_non_empty_string(lookup, "SQLITE_EMBEDDING_ENDPOINT"),
-        size: required_positive_usize(lookup, "SQLITE_EMBEDDING_SIZE")?,
+        model,
+        cache_dir: optional_path(lookup, "SQLITE_EMBEDDING_CACHE_DIR")?,
+        dimension,
     })
+}
+
+#[cfg(feature = "vector")]
+fn parse_embedding_model(value: &str) -> Result<EmbeddingModel, AppError> {
+    match value {
+        "BAAI/bge-small-en-v1.5" | "bge-small-en-v1.5" | "BGESmallENV15" | "bgesmallenv15" => {
+            Ok(EmbeddingModel::BGESmallENV15)
+        }
+        _ => Err(AppError::InvalidInput(format!(
+            "unsupported SQLITE_EMBEDDING_MODEL: {value}; currently supported: BAAI/bge-small-en-v1.5"
+        ))),
+    }
 }
 
 #[cfg(feature = "vector")]
@@ -120,48 +151,44 @@ where
 {
     let provider = optional_non_empty_string(lookup, "SQLITE_RERANKER_PROVIDER");
     let model = optional_non_empty_string(lookup, "SQLITE_RERANKER_MODEL");
-    let endpoint = optional_non_empty_string(lookup, "SQLITE_RERANKER_ENDPOINT");
+    let cache_dir = optional_path(lookup, "SQLITE_RERANKER_CACHE_DIR")?;
 
-    if provider.is_none() && model.is_none() && endpoint.is_none() {
+    if provider.is_none() && model.is_none() && cache_dir.is_none() {
         return Ok(None);
     }
 
-    let Some(provider) = provider else {
-        return Err(AppError::InvalidInput(
-            "SQLITE_RERANKER_PROVIDER is required when reranker is configured".to_string(),
-        ));
-    };
-    let Some(model) = model else {
-        return Err(AppError::InvalidInput(
-            "SQLITE_RERANKER_MODEL is required when reranker is configured".to_string(),
-        ));
-    };
+    let provider = provider.unwrap_or_else(|| "fastembed".to_string());
+    let model = model.unwrap_or_else(|| "BAAI/bge-reranker-base".to_string());
 
     let provider = match provider.as_str() {
-        "builtin" => RerankerProvider::Builtin,
+        "fastembed" => RerankerProvider::Fastembed,
         _ => {
             return Err(AppError::InvalidInput(
-                "SQLITE_RERANKER_PROVIDER must be one of: builtin".to_string(),
+                "SQLITE_RERANKER_PROVIDER must be one of: fastembed".to_string(),
             ));
         }
     };
 
+    parse_reranker_model(&model)?;
+
     Ok(Some(RerankerConfig {
         provider,
         model,
-        endpoint,
-        timeout_ms: positive_u64(lookup, "SQLITE_RERANKER_TIMEOUT_MS", 10_000)?,
+        cache_dir,
     }))
 }
 
 #[cfg(feature = "vector")]
-fn required_string<F>(lookup: &F, key: &str) -> Result<String, AppError>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    optional_non_empty_string(lookup, key).ok_or_else(|| {
-        AppError::ConfigMissing(format!("{key} is required when vector feature is enabled"))
-    })
+fn parse_reranker_model(value: &str) -> Result<RerankerModel, AppError> {
+    match value {
+        "BAAI/bge-reranker-base" | "bge-reranker-base" | "BGERerankerBase"
+        | "bgererankerbase" => Ok(RerankerModel::BGERerankerBase),
+        _ => value.parse::<RerankerModel>().map_err(|_| {
+            AppError::InvalidInput(format!(
+                "unsupported SQLITE_RERANKER_MODEL: {value}; currently supported default: BAAI/bge-reranker-base"
+            ))
+        }),
+    }
 }
 
 #[cfg(feature = "vector")]
@@ -253,24 +280,6 @@ where
     }
 }
 
-#[cfg(feature = "vector")]
-fn required_positive_usize<F>(lookup: &F, key: &str) -> Result<usize, AppError>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    let value = lookup(key).ok_or_else(|| AppError::ConfigMissing(format!("{key} is required")))?;
-    let parsed = value
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| AppError::InvalidInput(format!("{key} must be a positive integer")))?;
-    if parsed == 0 {
-        return Err(AppError::InvalidInput(format!(
-            "{key} must be greater than zero"
-        )));
-    }
-    Ok(parsed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::AppConfig;
@@ -280,12 +289,8 @@ mod tests {
         let cfg = AppConfig::from_lookup(|key| {
             #[cfg(feature = "vector")]
             {
-                match key {
-                    "SQLITE_EMBEDDING_PROVIDER" => Some("builtin".to_string()),
-                    "SQLITE_EMBEDDING_MODEL" => Some("default".to_string()),
-                    "SQLITE_EMBEDDING_SIZE" => Some("16".to_string()),
-                    _ => None,
-                }
+                let _ = key;
+                None
             }
 
             #[cfg(not(feature = "vector"))]
@@ -329,14 +334,70 @@ mod tests {
     #[test]
     fn validates_vector_configuration() {
         let cfg = AppConfig::from_lookup(|key| match key {
-            "SQLITE_EMBEDDING_PROVIDER" => Some("builtin".to_string()),
-            "SQLITE_EMBEDDING_MODEL" => Some("demo".to_string()),
-            "SQLITE_EMBEDDING_SIZE" => Some("16".to_string()),
+            "SQLITE_EMBEDDING_PROVIDER" => Some("fastembed".to_string()),
+            "SQLITE_EMBEDDING_MODEL" => Some("BAAI/bge-small-en-v1.5".to_string()),
             _ => None,
         })
         .expect("vector config should parse");
 
-        assert_eq!(cfg.embedding.size, 16);
+        assert!(matches!(
+            cfg.embedding.provider,
+            super::EmbeddingProvider::Fastembed
+        ));
+        assert_eq!(cfg.embedding.model, "BAAI/bge-small-en-v1.5");
+        assert_eq!(cfg.embedding.dimension, 384);
+        assert!(cfg.embedding.cache_dir.is_none());
         assert!(cfg.reranker.is_none());
+        assert_eq!(cfg.max_vector_top_k, 200);
+        assert_eq!(cfg.max_rerank_fetch_k, 500);
+    }
+
+    #[cfg(feature = "vector")]
+    #[test]
+    fn resolves_embedding_cache_dir() {
+        let cfg = AppConfig::from_lookup(|key| match key {
+            "SQLITE_EMBEDDING_CACHE_DIR" => Some(".".to_string()),
+            _ => None,
+        })
+        .expect("vector config should parse with cache dir");
+
+        let cache_dir = cfg
+            .embedding
+            .cache_dir
+            .expect("cache dir should be present");
+        assert!(cache_dir.is_absolute());
+    }
+
+    #[cfg(feature = "vector")]
+    #[test]
+    fn uses_reranker_defaults_when_enabled() {
+        let cfg = AppConfig::from_lookup(|key| match key {
+            "SQLITE_RERANKER_PROVIDER" => Some("fastembed".to_string()),
+            _ => None,
+        })
+        .expect("vector config should parse with reranker enabled");
+
+        let reranker = cfg.reranker.expect("reranker should be configured");
+        assert!(matches!(
+            reranker.provider,
+            super::RerankerProvider::Fastembed
+        ));
+        assert_eq!(reranker.model, "BAAI/bge-reranker-base");
+        assert!(reranker.cache_dir.is_none());
+    }
+
+    #[cfg(feature = "vector")]
+    #[test]
+    fn resolves_reranker_cache_dir() {
+        let cfg = AppConfig::from_lookup(|key| match key {
+            "SQLITE_RERANKER_PROVIDER" => Some("fastembed".to_string()),
+            "SQLITE_RERANKER_CACHE_DIR" => Some(".".to_string()),
+            _ => None,
+        })
+        .expect("vector config should parse with reranker cache dir");
+
+        let reranker = cfg.reranker.expect("reranker should be configured");
+        let cache_dir = reranker.cache_dir.expect("cache dir should be present");
+        assert!(cache_dir.is_absolute());
     }
 }
