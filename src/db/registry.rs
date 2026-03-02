@@ -7,11 +7,11 @@ use rusqlite::Connection;
 #[cfg(feature = "vector")]
 use sqlite_vec::sqlite3_vec_init;
 
+use crate::DEFAULT_DB_ID;
 use crate::contracts::db::{
     DbCloseData, DbListData, DbMode, DbOpenData, DbSummary, ExtensionsLoaded,
 };
 use crate::errors::{AppError, AppResult};
-use crate::DEFAULT_DB_ID;
 
 use super::persistence::{enforce_db_size_limit, list_persisted_entries, resolve_persist_path};
 

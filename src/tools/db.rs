@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use crate::DEFAULT_DB_ID;
 use crate::contracts::common::ToolEnvelope;
 use crate::contracts::db::{
     DbCloseData, DbCloseRequest, DbListData, DbListRequest, DbOpenData, DbOpenRequest,
@@ -8,7 +9,6 @@ use crate::db::registry::DbRegistry;
 use crate::errors::AppResult;
 use crate::pagination::cursor_store::CursorStore;
 use crate::server::finalize::finalize_tool;
-use crate::DEFAULT_DB_ID;
 
 pub fn db_open(
     registry: &mut DbRegistry,

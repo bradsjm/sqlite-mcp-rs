@@ -264,9 +264,7 @@ fn build_insert_sql(
         .collect::<Vec<_>>()
         .join(", ");
 
-    format!(
-        "{conflict} {quoted_table} ({column_list}) VALUES ({placeholders})",
-    )
+    format!("{conflict} {quoted_table} ({column_list}) VALUES ({placeholders})",)
 }
 
 fn quote_identifier(identifier: &str) -> String {

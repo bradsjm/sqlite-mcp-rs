@@ -171,7 +171,7 @@ mod tests {
 
     use crate::config::{EmbeddingConfig, EmbeddingProvider};
 
-    use super::{serialize_embedding_json, EmbeddingClient};
+    use super::{EmbeddingClient, serialize_embedding_json};
 
     fn test_config(dimension: usize) -> EmbeddingConfig {
         EmbeddingConfig {

@@ -6,7 +6,8 @@ use std::time::Instant;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 
-use crate::adapters::embeddings::{serialize_embedding_json, EmbeddingClient};
+use crate::DEFAULT_DB_ID;
+use crate::adapters::embeddings::{EmbeddingClient, serialize_embedding_json};
 use crate::adapters::reranker::RerankerClient;
 use crate::config::{EmbeddingConfig, RerankerConfig};
 use crate::contracts::common::ToolEnvelope;
@@ -21,7 +22,6 @@ use crate::db::registry::DbRegistry;
 use crate::errors::{AppError, AppResult};
 use crate::policy::is_valid_identifier;
 use crate::server::finalize::finalize_tool;
-use crate::DEFAULT_DB_ID;
 
 pub struct VectorRuntime {
     embedding: EmbeddingClient,
@@ -673,7 +673,7 @@ mod tests {
     use crate::db::registry::DbRegistry;
     use crate::errors::AppError;
 
-    use super::{vector_collection_create, vector_search, vector_upsert, VectorRuntime};
+    use super::{VectorRuntime, vector_collection_create, vector_search, vector_upsert};
 
     fn embedding_config(dimension: usize) -> EmbeddingConfig {
         EmbeddingConfig {

@@ -1,7 +1,7 @@
-use sqlite_mcp_rs::config::AppConfig;
-use sqlite_mcp_rs::server::mcp::SqliteMcpServer;
 #[cfg(feature = "vector")]
 use sqlite_mcp_rs::adapters::ort_runtime::initialize_ort_dylib_env;
+use sqlite_mcp_rs::config::AppConfig;
+use sqlite_mcp_rs::server::mcp::SqliteMcpServer;
 
 use rmcp::{ServiceExt, transport::stdio};
 
