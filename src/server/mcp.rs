@@ -11,6 +11,7 @@ use schemars::JsonSchema;
 #[cfg(not(feature = "vector"))]
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use tokio::task;
 use uuid::Uuid;
 
 use crate::config::AppConfig;
@@ -29,7 +30,7 @@ use crate::contracts::vector::{
     VectorUpsertRequest,
 };
 use crate::db::registry::DbRegistry;
-use crate::errors::{AppError, ErrorCode};
+use crate::errors::{AppError, AppResult, ErrorCode};
 use crate::pagination::cursor_store::CursorStore;
 use crate::policy::SqlPolicy;
 use crate::tools;
@@ -137,14 +138,19 @@ impl SqliteMcpServer {
         );
     }
 
-    fn log_tool_error(tool: &str, db_id: &str, started_at: Instant, error: &AppError) {
+    fn log_tool_error(
+        tool: &str,
+        db_id: &str,
+        request_id: &str,
+        started_at: Instant,
+        error: &AppError,
+    ) {
         let protocol = error.to_protocol_error();
-        let request_id = Uuid::new_v4().to_string();
         let elapsed_ms = started_at.elapsed().as_millis() as u64;
 
         if protocol.details.retryable {
             tracing::warn!(
-                request_id = %request_id,
+                request_id,
                 tool,
                 db_id,
                 status = "error",
@@ -154,7 +160,7 @@ impl SqliteMcpServer {
             );
         } else {
             tracing::error!(
-                request_id = %request_id,
+                request_id,
                 tool,
                 db_id,
                 status = "error",
@@ -165,7 +171,7 @@ impl SqliteMcpServer {
         }
     }
 
-    fn map_error(error: AppError) -> McpError {
+    fn map_error(error: AppError, request_id: Option<&str>) -> McpError {
         let protocol = error.to_protocol_error();
         let code = match protocol.details.code {
             ErrorCode::Internal | ErrorCode::SqlError | ErrorCode::DependencyError => {
@@ -174,22 +180,69 @@ impl SqliteMcpServer {
             _ => rmcp::model::ErrorCode::INVALID_PARAMS,
         };
 
+        let context = match (request_id, protocol.details.context) {
+            (Some(request_id), Some(mut context)) => {
+                if let Some(object) = context.as_object_mut() {
+                    object.insert(
+                        "request_id".to_string(),
+                        serde_json::Value::String(request_id.to_string()),
+                    );
+                    Some(context)
+                } else {
+                    Some(serde_json::json!({
+                        "request_id": request_id,
+                        "context": context,
+                    }))
+                }
+            }
+            (Some(request_id), None) => Some(serde_json::json!({ "request_id": request_id })),
+            (None, context) => context,
+        };
+
         McpError::new(
             code,
             protocol.message,
             Some(serde_json::json!({
                 "code": protocol.details.code,
                 "retryable": protocol.details.retryable,
-                "context": protocol.details.context,
+                "context": context,
             })),
         )
     }
 
     #[cfg(not(feature = "vector"))]
     fn vector_disabled_error() -> McpError {
-        Self::map_error(AppError::InvalidInput(
-            "vector feature is not enabled".to_string(),
-        ))
+        Self::map_error(
+            AppError::InvalidInput("vector feature is not enabled".to_string()),
+            None,
+        )
+    }
+
+    async fn run_blocking<T, F>(&self, task_fn: F) -> AppResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut DbRegistry, &mut CursorStore) -> AppResult<T> + Send + 'static,
+    {
+        let registry = Arc::clone(&self.registry);
+        let cursors = Arc::clone(&self.cursors);
+        task::spawn_blocking(move || {
+            let mut registry = registry.blocking_lock();
+            let mut cursors = cursors.blocking_lock();
+            task_fn(&mut registry, &mut cursors)
+        })
+        .await
+        .map_err(|_| AppError::Internal)?
+    }
+
+    fn stamp_response_request_id<T>(
+        mut response: ToolEnvelope<T>,
+        request_id: String,
+    ) -> ToolEnvelope<T>
+    where
+        T: serde::Serialize,
+    {
+        response._meta.request_id = request_id;
+        response
     }
 }
 
@@ -204,25 +257,32 @@ impl SqliteMcpServer {
         Parameters(request): Parameters<DbOpenRequest>,
     ) -> Result<Json<ToolEnvelope<DbOpenData>>, McpError> {
         let started_at = Instant::now();
+        let request_id = Uuid::new_v4().to_string();
         let resolved_db_id = request
             .db_id
             .clone()
             .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
-        let mut registry = self.registry.lock().await;
-        let mut cursors = self.cursors.lock().await;
-        let response = match tools::db::db_open(
-            &mut registry,
-            &mut cursors,
-            request,
-            self.persist_root.as_deref(),
-            self.config.max_db_bytes,
-        ) {
+        let persist_root = self.persist_root.clone();
+        let max_db_bytes = self.config.max_db_bytes;
+        let response = match self
+            .run_blocking(move |registry, cursors| {
+                tools::db::db_open(
+                    registry,
+                    cursors,
+                    request,
+                    persist_root.as_deref(),
+                    max_db_bytes,
+                )
+            })
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
-                Self::log_tool_error("db_open", &resolved_db_id, started_at, &error);
-                return Err(Self::map_error(error));
+                Self::log_tool_error("db_open", &resolved_db_id, &request_id, started_at, &error);
+                return Err(Self::map_error(error, Some(&request_id)));
             }
         };
+        let response = Self::stamp_response_request_id(response, request_id);
         Self::log_tool_ok("db_open", &resolved_db_id, &response._meta, false);
         Ok(Json(response))
     }
@@ -236,42 +296,57 @@ impl SqliteMcpServer {
         Parameters(request): Parameters<DbListRequest>,
     ) -> Result<Json<ToolEnvelope<DbListData>>, McpError> {
         let started_at = Instant::now();
-        let registry = self.registry.lock().await;
-        let response = match tools::db::db_list(
-            &registry,
-            request,
-            self.persist_root.as_deref(),
-            self.config.max_persisted_list_entries,
-        ) {
+        let request_id = Uuid::new_v4().to_string();
+        let persist_root = self.persist_root.clone();
+        let persisted_limit = self.config.max_persisted_list_entries;
+        let response = match self
+            .run_blocking(move |registry, _cursors| {
+                tools::db::db_list(registry, request, persist_root.as_deref(), persisted_limit)
+            })
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
-                Self::log_tool_error("db_list", crate::DEFAULT_DB_ID, started_at, &error);
-                return Err(Self::map_error(error));
+                Self::log_tool_error(
+                    "db_list",
+                    crate::DEFAULT_DB_ID,
+                    &request_id,
+                    started_at,
+                    &error,
+                );
+                return Err(Self::map_error(error, Some(&request_id)));
             }
         };
+        let response = Self::stamp_response_request_id(response, request_id);
         Self::log_tool_ok("db_list", crate::DEFAULT_DB_ID, &response._meta, false);
         Ok(Json(response))
     }
 
-    #[tool(name = "db_close", description = "Close an open SQLite database handle")]
+    #[tool(
+        name = "db_close",
+        description = "Close an open SQLite database handle"
+    )]
     async fn db_close(
         &self,
         Parameters(request): Parameters<DbCloseRequest>,
     ) -> Result<Json<ToolEnvelope<DbCloseData>>, McpError> {
         let started_at = Instant::now();
+        let request_id = Uuid::new_v4().to_string();
         let resolved_db_id = request
             .db_id
             .clone()
             .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
-        let mut registry = self.registry.lock().await;
-        let mut cursors = self.cursors.lock().await;
-        let response = match tools::db::db_close(&mut registry, &mut cursors, request) {
+        let response = match self
+            .run_blocking(move |registry, cursors| tools::db::db_close(registry, cursors, request))
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
-                Self::log_tool_error("db_close", &resolved_db_id, started_at, &error);
-                return Err(Self::map_error(error));
+                Self::log_tool_error("db_close", &resolved_db_id, &request_id, started_at, &error);
+                return Err(Self::map_error(error, Some(&request_id)));
             }
         };
+        let response = Self::stamp_response_request_id(response, request_id);
         Self::log_tool_ok("db_close", &resolved_db_id, &response._meta, false);
         Ok(Json(response))
     }
@@ -285,20 +360,31 @@ impl SqliteMcpServer {
         Parameters(request): Parameters<SqlQueryRequest>,
     ) -> Result<Json<ToolEnvelope<SqlQueryData>>, McpError> {
         let started_at = Instant::now();
+        let request_id = Uuid::new_v4().to_string();
         let resolved_db_id = request
             .db_id
             .clone()
             .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
-        let registry = self.registry.lock().await;
-        let mut cursors = self.cursors.lock().await;
         let policy = self.sql_policy();
-        let response = match tools::sql::sql_query(&registry, &mut cursors, &policy, request) {
+        let response = match self
+            .run_blocking(move |registry, cursors| {
+                tools::sql::sql_query(registry, cursors, &policy, request)
+            })
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
-                Self::log_tool_error("sql_query", &resolved_db_id, started_at, &error);
-                return Err(Self::map_error(error));
+                Self::log_tool_error(
+                    "sql_query",
+                    &resolved_db_id,
+                    &request_id,
+                    started_at,
+                    &error,
+                );
+                return Err(Self::map_error(error, Some(&request_id)));
             }
         };
+        let response = Self::stamp_response_request_id(response, request_id);
         Self::log_tool_ok("sql_query", &resolved_db_id, &response._meta, false);
         Ok(Json(response))
     }
@@ -312,19 +398,31 @@ impl SqliteMcpServer {
         Parameters(request): Parameters<SqlExecuteRequest>,
     ) -> Result<Json<ToolEnvelope<SqlExecuteData>>, McpError> {
         let started_at = Instant::now();
+        let request_id = Uuid::new_v4().to_string();
         let resolved_db_id = request
             .db_id
             .clone()
             .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
-        let registry = self.registry.lock().await;
         let policy = self.sql_policy();
-        let response = match tools::sql::sql_execute(&registry, &policy, request) {
+        let response = match self
+            .run_blocking(move |registry, _cursors| {
+                tools::sql::sql_execute(registry, &policy, request)
+            })
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
-                Self::log_tool_error("sql_execute", &resolved_db_id, started_at, &error);
-                return Err(Self::map_error(error));
+                Self::log_tool_error(
+                    "sql_execute",
+                    &resolved_db_id,
+                    &request_id,
+                    started_at,
+                    &error,
+                );
+                return Err(Self::map_error(error, Some(&request_id)));
             }
         };
+        let response = Self::stamp_response_request_id(response, request_id);
         Self::log_tool_ok("sql_execute", &resolved_db_id, &response._meta, false);
         Ok(Json(response))
     }
@@ -335,19 +433,31 @@ impl SqliteMcpServer {
         Parameters(request): Parameters<SqlBatchRequest>,
     ) -> Result<Json<ToolEnvelope<SqlBatchData>>, McpError> {
         let started_at = Instant::now();
+        let request_id = Uuid::new_v4().to_string();
         let resolved_db_id = request
             .db_id
             .clone()
             .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
-        let registry = self.registry.lock().await;
         let policy = self.sql_policy();
-        let response = match tools::sql::sql_batch(&registry, &policy, request) {
+        let response = match self
+            .run_blocking(move |registry, _cursors| {
+                tools::sql::sql_batch(registry, &policy, request)
+            })
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
-                Self::log_tool_error("sql_batch", &resolved_db_id, started_at, &error);
-                return Err(Self::map_error(error));
+                Self::log_tool_error(
+                    "sql_batch",
+                    &resolved_db_id,
+                    &request_id,
+                    started_at,
+                    &error,
+                );
+                return Err(Self::map_error(error, Some(&request_id)));
             }
         };
+        let response = Self::stamp_response_request_id(response, request_id);
         Self::log_tool_ok("sql_batch", &resolved_db_id, &response._meta, false);
         Ok(Json(response))
     }
@@ -361,19 +471,31 @@ impl SqliteMcpServer {
         Parameters(request): Parameters<DbImportRequest>,
     ) -> Result<Json<ToolEnvelope<DbImportData>>, McpError> {
         let started_at = Instant::now();
+        let request_id = Uuid::new_v4().to_string();
         let resolved_db_id = request
             .db_id
             .clone()
             .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
-        let registry = self.registry.lock().await;
         let policy = self.sql_policy();
-        let response = match tools::import::db_import(&registry, &policy, request) {
+        let response = match self
+            .run_blocking(move |registry, _cursors| {
+                tools::import::db_import(registry, &policy, request)
+            })
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
-                Self::log_tool_error("db_import", &resolved_db_id, started_at, &error);
-                return Err(Self::map_error(error));
+                Self::log_tool_error(
+                    "db_import",
+                    &resolved_db_id,
+                    &request_id,
+                    started_at,
+                    &error,
+                );
+                return Err(Self::map_error(error, Some(&request_id)));
             }
         };
+        let response = Self::stamp_response_request_id(response, request_id);
         Self::log_tool_ok("db_import", &resolved_db_id, &response._meta, false);
         Ok(Json(response))
     }
@@ -400,28 +522,37 @@ impl SqliteMcpServer {
         Parameters(request): Parameters<VectorCollectionCreateRequest>,
     ) -> Result<Json<ToolEnvelope<VectorCollectionCreateData>>, McpError> {
         let started_at = Instant::now();
+        let request_id = Uuid::new_v4().to_string();
         let resolved_db_id = request
             .db_id
             .clone()
             .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
-        let registry = self.registry.lock().await;
-        let response = match tools::vector::vector_collection_create(
-            &registry,
-            &self.vector_runtime,
-            request,
-            self.config.max_db_bytes,
-        ) {
+        let max_db_bytes = self.config.max_db_bytes;
+        let vector_runtime = Arc::clone(&self.vector_runtime);
+        let response = match self
+            .run_blocking(move |registry, _cursors| {
+                tools::vector::vector_collection_create(
+                    registry,
+                    &vector_runtime,
+                    request,
+                    max_db_bytes,
+                )
+            })
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
                 Self::log_tool_error(
                     "vector_collection_create",
                     &resolved_db_id,
+                    &request_id,
                     started_at,
                     &error,
                 );
-                return Err(Self::map_error(error));
+                return Err(Self::map_error(error, Some(&request_id)));
             }
         };
+        let response = Self::stamp_response_request_id(response, request_id);
         Self::log_tool_ok(
             "vector_collection_create",
             &resolved_db_id,
@@ -453,23 +584,30 @@ impl SqliteMcpServer {
         Parameters(request): Parameters<VectorCollectionListRequest>,
     ) -> Result<Json<ToolEnvelope<VectorCollectionListData>>, McpError> {
         let started_at = Instant::now();
+        let request_id = Uuid::new_v4().to_string();
         let resolved_db_id = request
             .db_id
             .clone()
             .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
-        let registry = self.registry.lock().await;
-        let response = match tools::vector::vector_collection_list(&registry, request) {
+        let response = match self
+            .run_blocking(move |registry, _cursors| {
+                tools::vector::vector_collection_list(registry, request)
+            })
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
                 Self::log_tool_error(
                     "vector_collection_list",
                     &resolved_db_id,
+                    &request_id,
                     started_at,
                     &error,
                 );
-                return Err(Self::map_error(error));
+                return Err(Self::map_error(error, Some(&request_id)));
             }
         };
+        let response = Self::stamp_response_request_id(response, request_id);
         Self::log_tool_ok(
             "vector_collection_list",
             &resolved_db_id,
@@ -495,23 +633,32 @@ impl SqliteMcpServer {
         Parameters(request): Parameters<VectorUpsertRequest>,
     ) -> Result<Json<ToolEnvelope<VectorUpsertData>>, McpError> {
         let started_at = Instant::now();
+        let request_id = Uuid::new_v4().to_string();
         let resolved_db_id = request
             .db_id
             .clone()
             .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
-        let registry = self.registry.lock().await;
-        let response = match tools::vector::vector_upsert(
-            &registry,
-            &self.vector_runtime,
-            request,
-            self.config.max_db_bytes,
-        ) {
+        let max_db_bytes = self.config.max_db_bytes;
+        let vector_runtime = Arc::clone(&self.vector_runtime);
+        let response = match self
+            .run_blocking(move |registry, _cursors| {
+                tools::vector::vector_upsert(registry, &vector_runtime, request, max_db_bytes)
+            })
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
-                Self::log_tool_error("vector_upsert", &resolved_db_id, started_at, &error);
-                return Err(Self::map_error(error));
+                Self::log_tool_error(
+                    "vector_upsert",
+                    &resolved_db_id,
+                    &request_id,
+                    started_at,
+                    &error,
+                );
+                return Err(Self::map_error(error, Some(&request_id)));
             }
         };
+        let response = Self::stamp_response_request_id(response, request_id);
         Self::log_tool_ok("vector_upsert", &resolved_db_id, &response._meta, false);
         Ok(Json(response))
     }
@@ -532,24 +679,39 @@ impl SqliteMcpServer {
         Parameters(request): Parameters<VectorSearchRequest>,
     ) -> Result<Json<ToolEnvelope<VectorSearchData>>, McpError> {
         let started_at = Instant::now();
+        let request_id = Uuid::new_v4().to_string();
         let resolved_db_id = request
             .db_id
             .clone()
             .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
-        let registry = self.registry.lock().await;
-        let response = match tools::vector::vector_search(
-            &registry,
-            &self.vector_runtime,
-            request,
-            self.config.max_vector_top_k,
-            self.config.max_rerank_fetch_k,
-        ) {
+        let max_vector_top_k = self.config.max_vector_top_k;
+        let max_rerank_fetch_k = self.config.max_rerank_fetch_k;
+        let vector_runtime = Arc::clone(&self.vector_runtime);
+        let response = match self
+            .run_blocking(move |registry, _cursors| {
+                tools::vector::vector_search(
+                    registry,
+                    &vector_runtime,
+                    request,
+                    max_vector_top_k,
+                    max_rerank_fetch_k,
+                )
+            })
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
-                Self::log_tool_error("vector_search", &resolved_db_id, started_at, &error);
-                return Err(Self::map_error(error));
+                Self::log_tool_error(
+                    "vector_search",
+                    &resolved_db_id,
+                    &request_id,
+                    started_at,
+                    &error,
+                );
+                return Err(Self::map_error(error, Some(&request_id)));
             }
         };
+        let response = Self::stamp_response_request_id(response, request_id);
         let partial = !response.data.issues.is_empty();
         Self::log_tool_ok("vector_search", &resolved_db_id, &response._meta, partial);
         Ok(Json(response))

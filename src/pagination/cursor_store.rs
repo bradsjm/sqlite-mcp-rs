@@ -37,7 +37,10 @@ impl CursorStore {
         }
     }
 
-    pub fn create(&mut self, state: CursorState) -> String {
+    pub fn create(&mut self, state: CursorState) -> Option<String> {
+        if !self.enabled() {
+            return None;
+        }
         self.evict_expired();
         self.evict_to_capacity();
 
@@ -47,7 +50,11 @@ impl CursorStore {
             expires_at: Instant::now() + self.ttl,
         };
         self.entries.insert(cursor.clone(), entry);
-        cursor
+        Some(cursor)
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.capacity > 0
     }
 
     pub fn get(&mut self, cursor: &str) -> Option<CursorState> {
@@ -123,7 +130,9 @@ mod tests {
     #[test]
     fn creates_and_gets_cursor() {
         let mut store = CursorStore::new(Duration::from_secs(60), 10);
-        let cursor = store.create(sample_state(0));
+        let cursor = store
+            .create(sample_state(0))
+            .expect("cursor creation should be enabled");
         let state = store.get(&cursor).expect("cursor should exist");
         assert_eq!(state.offset, 0);
     }
@@ -131,7 +140,9 @@ mod tests {
     #[test]
     fn updates_offset() {
         let mut store = CursorStore::new(Duration::from_secs(60), 10);
-        let cursor = store.create(sample_state(0));
+        let cursor = store
+            .create(sample_state(0))
+            .expect("cursor creation should be enabled");
         assert!(store.update_offset(&cursor, 12));
         let state = store.get(&cursor).expect("cursor should exist");
         assert_eq!(state.offset, 12);
@@ -140,7 +151,9 @@ mod tests {
     #[test]
     fn expires_entries() {
         let mut store = CursorStore::new(Duration::from_millis(5), 10);
-        let cursor = store.create(sample_state(0));
+        let cursor = store
+            .create(sample_state(0))
+            .expect("cursor creation should be enabled");
         thread::sleep(Duration::from_millis(8));
         assert!(store.get(&cursor).is_none());
     }
@@ -148,8 +161,17 @@ mod tests {
     #[test]
     fn invalidates_db_entries() {
         let mut store = CursorStore::new(Duration::from_secs(60), 10);
-        let cursor = store.create(sample_state(1));
+        let cursor = store
+            .create(sample_state(1))
+            .expect("cursor creation should be enabled");
         store.invalidate_db("default");
         assert!(store.get(&cursor).is_none());
+    }
+
+    #[test]
+    fn capacity_zero_disables_cursors() {
+        let mut store = CursorStore::new(Duration::from_secs(60), 0);
+        assert!(!store.enabled());
+        assert!(store.create(sample_state(0)).is_none());
     }
 }

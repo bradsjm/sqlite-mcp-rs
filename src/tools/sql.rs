@@ -2,10 +2,11 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
-use rusqlite::types::{Value as SqlValue, ValueRef};
 use rusqlite::Statement;
-use serde_json::{json, Map, Value};
+use rusqlite::types::{Value as SqlValue, ValueRef};
+use serde_json::{Map, Value, json};
 
+use crate::DEFAULT_DB_ID;
 use crate::contracts::common::{ToolEnvelope, ToolHint};
 use crate::contracts::sql::{
     BatchResultKind, SqlBatchData, SqlBatchRequest, SqlBatchResult, SqlExecuteData,
@@ -16,11 +17,10 @@ use crate::db::registry::DbRegistry;
 use crate::errors::{AppError, AppResult};
 use crate::pagination::cursor_store::{CursorState, CursorStore};
 use crate::policy::{
-    contains_blocked_sql, contains_protected_table_reference, looks_destructive_batch,
-    split_sql_statements, SqlPolicy,
+    SqlPolicy, contains_blocked_sql, contains_protected_table_reference, looks_destructive_batch,
+    split_sql_statements,
 };
 use crate::server::finalize::finalize_tool;
-use crate::DEFAULT_DB_ID;
 
 pub fn sql_query(
     registry: &DbRegistry,
@@ -124,14 +124,14 @@ pub fn sql_query(
         if let Some(cursor_id) = existing_cursor_id {
             cursor_store.delete(&cursor_id);
         }
-        let cursor_id = cursor_store.create(state);
-
-        hints.push(ToolHint {
-            tool: "sql_query".to_string(),
-            arguments: json!({ "db_id": db_id, "cursor": cursor_id }),
-            reason: "Continue reading the remaining rows with this cursor.".to_string(),
-        });
-        next_cursor = Some(cursor_id);
+        if let Some(cursor_id) = cursor_store.create(state) {
+            hints.push(ToolHint {
+                tool: "sql_query".to_string(),
+                arguments: json!({ "db_id": db_id, "cursor": cursor_id }),
+                reason: "Continue reading the remaining rows with this cursor.".to_string(),
+            });
+            next_cursor = Some(cursor_id);
+        }
     } else if let Some(cursor_id) = existing_cursor_id {
         cursor_store.delete(&cursor_id);
     }
