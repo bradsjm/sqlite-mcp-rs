@@ -2,6 +2,12 @@
 name = "sqlite-mcp-rs"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "SQLite Machine (MCP) server with vector and embeddings support."
+repository = "https://github.com/bradsjm/sqlite-mcp-rs"
+readme = "README.md"
+keywords = ["sqlite", "mcp", "embeddings", "vectors"]
+categories = ["database"]
 
 [features]
 default = []
