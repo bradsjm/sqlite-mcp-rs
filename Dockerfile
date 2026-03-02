@@ -18,11 +18,18 @@ RUN mkdir -p /opt/onnxruntime && \
     tar -xzf /tmp/onnxruntime.tgz -C /opt/onnxruntime --strip-components=1 && \
     rm /tmp/onnxruntime.tgz
 
+# Pre-download HuggingFace models
+RUN chmod +x scripts/download-models.sh && ./scripts/download-models.sh
+
 FROM alpine:latest
 LABEL org.opencontainers.image.description="Bounded SQLite MCP server over stdio with typed tool contracts, cursor-based pagination, and optional vector search"
 # Install CA certificates for HTTPS (required for HuggingFace model downloads)
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /app/target/release/sqlite-mcp-rs /sqlite-mcp-rs
 COPY --from=builder /opt/onnxruntime /opt/onnxruntime
+# Copy pre-downloaded models from builder
+COPY --from=builder /root/.cache/huggingface /root/.cache/huggingface
 ENV ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so
+# Set HuggingFace cache directory
+ENV HF_HOME=/root/.cache/huggingface
 ENTRYPOINT ["/sqlite-mcp-rs"]
