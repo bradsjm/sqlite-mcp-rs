@@ -18,6 +18,11 @@ pub struct AppConfig {
     pub max_persisted_list_entries: usize,
     pub cursor_ttl_seconds: u64,
     pub cursor_capacity: usize,
+    pub queue_wait_timeout_ms_default: u64,
+    pub queue_wait_timeout_ms_max: u64,
+    pub queue_poll_interval_ms_default: u64,
+    pub queue_poll_interval_ms_min: u64,
+    pub queue_poll_interval_ms_max: u64,
     #[cfg(feature = "vector")]
     pub max_vector_top_k: usize,
     #[cfg(feature = "vector")]
@@ -66,7 +71,7 @@ impl AppConfig {
     where
         F: Fn(&str) -> Option<String>,
     {
-        Ok(Self {
+        let config = Self {
             persist_root: optional_path(&lookup, "SQLITE_PERSIST_ROOT")?,
             log_level: log_level(&lookup, "SQLITE_LOG_LEVEL", "info")?,
             max_sql_length: positive_usize(&lookup, "SQLITE_MAX_SQL_LENGTH", 20_000)?,
@@ -81,6 +86,31 @@ impl AppConfig {
             )?,
             cursor_ttl_seconds: positive_u64(&lookup, "SQLITE_CURSOR_TTL_SECONDS", 600)?,
             cursor_capacity: positive_usize(&lookup, "SQLITE_CURSOR_CAPACITY", 500)?,
+            queue_wait_timeout_ms_default: positive_u64(
+                &lookup,
+                "SQLITE_QUEUE_WAIT_TIMEOUT_MS_DEFAULT",
+                30_000,
+            )?,
+            queue_wait_timeout_ms_max: positive_u64(
+                &lookup,
+                "SQLITE_QUEUE_WAIT_TIMEOUT_MS_MAX",
+                120_000,
+            )?,
+            queue_poll_interval_ms_default: positive_u64(
+                &lookup,
+                "SQLITE_QUEUE_POLL_INTERVAL_MS_DEFAULT",
+                250,
+            )?,
+            queue_poll_interval_ms_min: positive_u64(
+                &lookup,
+                "SQLITE_QUEUE_POLL_INTERVAL_MS_MIN",
+                50,
+            )?,
+            queue_poll_interval_ms_max: positive_u64(
+                &lookup,
+                "SQLITE_QUEUE_POLL_INTERVAL_MS_MAX",
+                5_000,
+            )?,
             #[cfg(feature = "vector")]
             max_vector_top_k: positive_usize(&lookup, "SQLITE_MAX_VECTOR_TOP_K", 200)?,
             #[cfg(feature = "vector")]
@@ -89,7 +119,33 @@ impl AppConfig {
             embedding: embedding_config(&lookup)?,
             #[cfg(feature = "vector")]
             reranker: reranker_config(&lookup)?,
-        })
+        };
+        config.validate_queue_wait_bounds()?;
+        Ok(config)
+    }
+
+    fn validate_queue_wait_bounds(&self) -> Result<(), AppError> {
+        if self.queue_wait_timeout_ms_default > self.queue_wait_timeout_ms_max {
+            return Err(AppError::InvalidInput(
+                "SQLITE_QUEUE_WAIT_TIMEOUT_MS_DEFAULT must be less than or equal to SQLITE_QUEUE_WAIT_TIMEOUT_MS_MAX".to_string(),
+            ));
+        }
+
+        if self.queue_poll_interval_ms_min > self.queue_poll_interval_ms_max {
+            return Err(AppError::InvalidInput(
+                "SQLITE_QUEUE_POLL_INTERVAL_MS_MIN must be less than or equal to SQLITE_QUEUE_POLL_INTERVAL_MS_MAX".to_string(),
+            ));
+        }
+
+        if self.queue_poll_interval_ms_default < self.queue_poll_interval_ms_min
+            || self.queue_poll_interval_ms_default > self.queue_poll_interval_ms_max
+        {
+            return Err(AppError::InvalidInput(
+                "SQLITE_QUEUE_POLL_INTERVAL_MS_DEFAULT must be between SQLITE_QUEUE_POLL_INTERVAL_MS_MIN and SQLITE_QUEUE_POLL_INTERVAL_MS_MAX".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -311,6 +367,11 @@ mod tests {
         assert_eq!(cfg.max_rows, 500);
         assert_eq!(cfg.max_persisted_list_entries, 500);
         assert_eq!(cfg.log_level, "info");
+        assert_eq!(cfg.queue_wait_timeout_ms_default, 30_000);
+        assert_eq!(cfg.queue_wait_timeout_ms_max, 120_000);
+        assert_eq!(cfg.queue_poll_interval_ms_default, 250);
+        assert_eq!(cfg.queue_poll_interval_ms_min, 50);
+        assert_eq!(cfg.queue_poll_interval_ms_max, 5_000);
     }
 
     #[test]
@@ -333,6 +394,37 @@ mod tests {
             } else {
                 None
             }
+        });
+        assert!(cfg.is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_queue_timeout_bounds() {
+        let cfg = AppConfig::from_lookup(|key| match key {
+            "SQLITE_QUEUE_WAIT_TIMEOUT_MS_DEFAULT" => Some("2000".to_string()),
+            "SQLITE_QUEUE_WAIT_TIMEOUT_MS_MAX" => Some("1000".to_string()),
+            _ => None,
+        });
+        assert!(cfg.is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_queue_poll_bounds() {
+        let cfg = AppConfig::from_lookup(|key| match key {
+            "SQLITE_QUEUE_POLL_INTERVAL_MS_MIN" => Some("500".to_string()),
+            "SQLITE_QUEUE_POLL_INTERVAL_MS_MAX" => Some("100".to_string()),
+            _ => None,
+        });
+        assert!(cfg.is_err());
+    }
+
+    #[test]
+    fn rejects_queue_poll_default_outside_bounds() {
+        let cfg = AppConfig::from_lookup(|key| match key {
+            "SQLITE_QUEUE_POLL_INTERVAL_MS_DEFAULT" => Some("50".to_string()),
+            "SQLITE_QUEUE_POLL_INTERVAL_MS_MIN" => Some("100".to_string()),
+            "SQLITE_QUEUE_POLL_INTERVAL_MS_MAX" => Some("500".to_string()),
+            _ => None,
         });
         assert!(cfg.is_err());
     }

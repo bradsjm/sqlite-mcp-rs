@@ -10,6 +10,7 @@ A bounded Model Context Protocol (MCP) server for SQLite with stdio (default) an
 - **Cursor pagination**: resumable `sql_query` with TTL and bounded cursor capacity
 - **Ephemeral + persisted support**: open/list/close in-memory (ephemeral) and file-backed (persisted) SQLite databases
 - **Import support**: ingest CSV or JSON rows into validated table/column targets
+- **Lightweight queue primitives**: push JSON jobs and long-poll for new rows over MCP/HTTP
 - **Optional vector search**: sqlite-vec collections with embedding and optional reranking (`vector` feature)
 
 ## Installation
@@ -120,6 +121,11 @@ SQLITE_MAX_DB_BYTES=100000000
 SQLITE_MAX_PERSISTED_LIST_ENTRIES=500
 SQLITE_CURSOR_TTL_SECONDS=600
 SQLITE_CURSOR_CAPACITY=500
+SQLITE_QUEUE_WAIT_TIMEOUT_MS_DEFAULT=30000
+SQLITE_QUEUE_WAIT_TIMEOUT_MS_MAX=120000
+SQLITE_QUEUE_POLL_INTERVAL_MS_DEFAULT=250
+SQLITE_QUEUE_POLL_INTERVAL_MS_MIN=50
+SQLITE_QUEUE_POLL_INTERVAL_MS_MAX=5000
 ```
 
 ### Vector Feature (Optional)
@@ -176,6 +182,13 @@ All tools return a consistent envelope:
 | `sql_batch` | Execute multiple write statements with optional transaction and destructive guard |
 | `db_import` | Import CSV/JSON rows into a table |
 
+### Queue Tools
+
+| Tool | Purpose |
+|------|---------|
+| `queue_push` | Insert a JSON job into a named queue |
+| `queue_wait` | Long-poll for the next visible job after a caller baseline |
+
 ### Vector Tools (`vector` feature)
 
 | Tool | Purpose |
@@ -194,6 +207,7 @@ For full schemas and validation rules, see `docs/tool-contract.md`.
 - `ATTACH` and `LOAD_EXTENSION` are blocked.
 - Destructive batch writes require `confirm_destructive=true`.
 - Writes to internal table `_vector_collections` are blocked from generic SQL tools.
+- `queue_wait` defaults to `include_existing=false` so callers wait for new rows unless they opt in.
 
 ## Troubleshooting
 

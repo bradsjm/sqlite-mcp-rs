@@ -11,6 +11,8 @@ This document defines the stable MCP tool surface for `sqlite-mcp-rs`.
 - `sql_execute`
 - `sql_batch`
 - `db_import`
+- `queue_push`
+- `queue_wait`
 - `vector_collection_create` (feature-gated: `vector`)
 - `vector_collection_list` (feature-gated: `vector`)
 - `vector_upsert` (feature-gated: `vector`)
@@ -265,6 +267,68 @@ Validation and enforcement:
 - Runs in a transaction; failures rollback.
 - For persisted DBs, post-import file size must be `<= SQLITE_MAX_DB_BYTES`.
 
+## `queue_push`
+
+Description: enqueue a JSON job row into a named queue.
+
+Input:
+
+- `db_id?: string` (default `"default"`)
+- `queue: string` (must match `^[A-Za-z_][A-Za-z0-9_]*$`)
+- `payload: object | array | string | number | boolean | null`
+- `metadata?: object`
+- `visible_at?: string` (optional; if present must be non-empty)
+
+Success `data` shape:
+
+- `queue: string`
+- `id: number`
+- `created_at: string` (RFC3339 UTC)
+- `visible_at: string`
+
+Validation and behavior:
+
+- Queue table `_queue_jobs` is created lazily on first use.
+- Payload + metadata encoded size must be `<= SQLITE_MAX_BYTES`.
+- `visible_at` defaults to current UTC timestamp when omitted.
+- Jobs are append-only rows; no claim/ack semantics are applied.
+
+## `queue_wait`
+
+Description: wait for the next visible queued job after a caller baseline.
+
+Input:
+
+- `db_id?: string` (default `"default"`)
+- `queue: string` (must match `^[A-Za-z_][A-Za-z0-9_]*$`)
+- `after_id?: number` (must be `>= 0`)
+- `timeout_ms?: number`
+- `poll_interval_ms?: number`
+- `include_existing?: boolean` (default `false`)
+
+Success `data` shape:
+
+- `queue: string`
+- `timed_out: boolean`
+- `job?: QueueJob`
+
+`QueueJob` shape:
+
+- `id: number`
+- `payload: object | array | string | number | boolean | null`
+- `metadata?: object`
+- `created_at: string`
+- `visible_at: string`
+
+Validation and behavior:
+
+- `timeout_ms` must be `1..=SQLITE_QUEUE_WAIT_TIMEOUT_MS_MAX`.
+- `poll_interval_ms` must be within `[SQLITE_QUEUE_POLL_INTERVAL_MS_MIN, SQLITE_QUEUE_POLL_INTERVAL_MS_MAX]`.
+- If `after_id` is omitted and `include_existing=false`, wait baseline is current max queue row id for that queue (new rows only).
+- If `after_id` is omitted and `include_existing=true`, wait baseline is `0` (existing rows are eligible).
+- Returns success with `timed_out=true` and no `job` when no matching row appears before timeout.
+- Delivery semantics are broadcast/read-only visibility (multiple waiters may observe the same row).
+
 ## `vector_collection_create` (feature `vector`)
 
 Description: create metadata and backing tables for a vector collection.
@@ -418,6 +482,11 @@ Runtime configuration keys:
 - `SQLITE_MAX_PERSISTED_LIST_ENTRIES`
 - `SQLITE_CURSOR_TTL_SECONDS`
 - `SQLITE_CURSOR_CAPACITY`
+- `SQLITE_QUEUE_WAIT_TIMEOUT_MS_DEFAULT`
+- `SQLITE_QUEUE_WAIT_TIMEOUT_MS_MAX`
+- `SQLITE_QUEUE_POLL_INTERVAL_MS_DEFAULT`
+- `SQLITE_QUEUE_POLL_INTERVAL_MS_MIN`
+- `SQLITE_QUEUE_POLL_INTERVAL_MS_MAX`
 
 Vector feature keys (required when `vector` is enabled unless noted):
 

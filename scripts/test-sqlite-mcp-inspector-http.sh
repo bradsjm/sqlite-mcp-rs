@@ -208,6 +208,8 @@ run_tests() {
     and ($names | index("sql_execute") != null)
     and ($names | index("sql_batch") != null)
     and ($names | index("db_import") != null)
+    and ($names | index("queue_push") != null)
+    and ($names | index("queue_wait") != null)
   '
 
   echo "Opening persisted DB over HTTP"
@@ -299,6 +301,85 @@ run_tests() {
     --tool-arg "db_id=${active_db_id}" \
     --tool-arg transaction=required \
     --tool-arg "statements=[{\"sql\":\"DELETE FROM sample_items;\"}]"
+
+  echo "Checking queue_wait default include_existing=false over HTTP"
+  run_inspector \
+    --method tools/call \
+    --tool-name queue_push \
+    --tool-arg "db_id=${active_db_id}" \
+    --tool-arg queue=http_queue_default_false \
+    --tool-arg 'payload={"kind":"existing"}' >/dev/null
+
+  local wait_default_false_json
+  wait_default_false_json=$(run_inspector \
+    --method tools/call \
+    --tool-name queue_wait \
+    --tool-arg "db_id=${active_db_id}" \
+    --tool-arg queue=http_queue_default_false \
+    --tool-arg timeout_ms=400 \
+    --tool-arg poll_interval_ms=100)
+  assert_json "$wait_default_false_json" '
+    (.isError != true)
+    and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).timed_out == true)
+    and (((.structuredContent.data // .data // .result.structuredContent.data // .result.data).job // null) == null)
+  '
+
+  echo "Checking concurrent queue_wait + queue_push over HTTP"
+  local wait_result_file
+  wait_result_file="$REPO_ROOT/.tmp/queue-wait-http-result.json"
+  rm -f "$wait_result_file"
+
+  (
+    run_inspector \
+      --method tools/call \
+      --tool-name queue_wait \
+      --tool-arg "db_id=${active_db_id}" \
+      --tool-arg queue=http_queue_async \
+      --tool-arg timeout_ms=5000 \
+      --tool-arg poll_interval_ms=100 >"$wait_result_file"
+  ) &
+  local wait_pid=$!
+
+  sleep 1
+
+  local push_json
+  push_json=$(run_inspector \
+    --method tools/call \
+    --tool-name queue_push \
+    --tool-arg "db_id=${active_db_id}" \
+    --tool-arg queue=http_queue_async \
+    --tool-arg 'payload={"kind":"async_http_job"}' \
+    --tool-arg 'metadata={"source":"http_test"}')
+
+  wait "$wait_pid"
+
+  if [[ ! -s "$wait_result_file" ]]; then
+    echo "queue_wait did not produce output" >&2
+    exit 1
+  fi
+
+  local wait_json
+  wait_json=$(cat "$wait_result_file")
+
+  assert_json "$push_json" '
+    (.isError != true)
+    and (((.structuredContent.data // .data // .result.structuredContent.data // .result.data).id // 0) > 0)
+  '
+  assert_json "$wait_json" '
+    (.isError != true)
+    and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).timed_out == false)
+    and (((.structuredContent.data // .data // .result.structuredContent.data // .result.data).job.payload.kind // "") == "async_http_job")
+    and (((.structuredContent.data // .data // .result.structuredContent.data // .result.data).job.metadata.source // "") == "http_test")
+  '
+
+  local push_id
+  local wait_job_id
+  push_id=$(printf '%s\n' "$push_json" | jq -r '(.structuredContent.data // .data // .result.structuredContent.data // .result.data).id')
+  wait_job_id=$(printf '%s\n' "$wait_json" | jq -r '(.structuredContent.data // .data // .result.structuredContent.data // .result.data).job.id')
+  if [[ "$push_id" != "$wait_job_id" ]]; then
+    echo "queue_wait returned job id ${wait_job_id}, expected ${push_id}" >&2
+    exit 1
+  fi
 
   echo "MCP inspector SQLite HTTP integration checks passed"
 }

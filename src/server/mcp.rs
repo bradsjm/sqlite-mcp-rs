@@ -20,6 +20,7 @@ use crate::contracts::db::{
     DbCloseData, DbCloseRequest, DbListData, DbListRequest, DbMode, DbOpenData, DbOpenRequest,
 };
 use crate::contracts::import::{DbImportData, DbImportRequest};
+use crate::contracts::queue::{QueuePushData, QueuePushRequest, QueueWaitData, QueueWaitRequest};
 use crate::contracts::sql::{
     SqlBatchData, SqlBatchRequest, SqlExecuteData, SqlExecuteRequest, SqlQueryData, SqlQueryRequest,
 };
@@ -107,6 +108,16 @@ impl SqliteMcpServer {
             max_rows: self.config.max_rows,
             max_bytes: self.config.max_bytes,
             max_db_bytes: self.config.max_db_bytes,
+        }
+    }
+
+    fn queue_wait_limits(&self) -> tools::queue::QueueWaitLimits {
+        tools::queue::QueueWaitLimits {
+            timeout_default_ms: self.config.queue_wait_timeout_ms_default,
+            timeout_max_ms: self.config.queue_wait_timeout_ms_max,
+            poll_interval_default_ms: self.config.queue_poll_interval_ms_default,
+            poll_interval_min_ms: self.config.queue_poll_interval_ms_min,
+            poll_interval_max_ms: self.config.queue_poll_interval_ms_max,
         }
     }
 
@@ -498,6 +509,121 @@ impl SqliteMcpServer {
         let response = Self::stamp_response_request_id(response, request_id);
         Self::log_tool_ok("db_import", &resolved_db_id, &response._meta, false);
         Ok(Json(response))
+    }
+
+    #[tool(name = "queue_push", description = "Enqueue a JSON job")]
+    async fn queue_push(
+        &self,
+        Parameters(request): Parameters<QueuePushRequest>,
+    ) -> Result<Json<ToolEnvelope<QueuePushData>>, McpError> {
+        let started_at = Instant::now();
+        let request_id = Uuid::new_v4().to_string();
+        let resolved_db_id = request
+            .db_id
+            .clone()
+            .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
+        let max_bytes = self.config.max_bytes;
+        let response = match self
+            .run_blocking(move |registry, _cursors| {
+                tools::queue::queue_push(registry, max_bytes, request)
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                Self::log_tool_error(
+                    "queue_push",
+                    &resolved_db_id,
+                    &request_id,
+                    started_at,
+                    &error,
+                );
+                return Err(Self::map_error(error, Some(&request_id)));
+            }
+        };
+        let response = Self::stamp_response_request_id(response, request_id);
+        Self::log_tool_ok("queue_push", &resolved_db_id, &response._meta, false);
+        Ok(Json(response))
+    }
+
+    #[tool(name = "queue_wait", description = "Wait for a new visible JSON job")]
+    async fn queue_wait(
+        &self,
+        Parameters(request): Parameters<QueueWaitRequest>,
+    ) -> Result<Json<ToolEnvelope<QueueWaitData>>, McpError> {
+        let started_at = Instant::now();
+        let request_id = Uuid::new_v4().to_string();
+        let resolved_db_id = request
+            .db_id
+            .clone()
+            .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
+
+        let limits = self.queue_wait_limits();
+        let plan = match self
+            .run_blocking(move |registry, _cursors| {
+                tools::queue::build_wait_plan(registry, limits, request)
+            })
+            .await
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                Self::log_tool_error(
+                    "queue_wait",
+                    &resolved_db_id,
+                    &request_id,
+                    started_at,
+                    &error,
+                );
+                return Err(Self::map_error(error, Some(&request_id)));
+            }
+        };
+
+        let timeout_at = started_at + Duration::from_millis(plan.timeout_ms);
+        loop {
+            let poll_db_id = plan.db_id.clone();
+            let poll_queue = plan.queue.clone();
+            let poll_after_id = plan.after_id;
+
+            let maybe_job = match self
+                .run_blocking(move |registry, _cursors| {
+                    tools::queue::poll_visible_job(
+                        registry,
+                        &poll_db_id,
+                        &poll_queue,
+                        poll_after_id,
+                    )
+                })
+                .await
+            {
+                Ok(job) => job,
+                Err(error) => {
+                    Self::log_tool_error(
+                        "queue_wait",
+                        &plan.db_id,
+                        &request_id,
+                        started_at,
+                        &error,
+                    );
+                    return Err(Self::map_error(error, Some(&request_id)));
+                }
+            };
+
+            if let Some(job) = maybe_job {
+                let response = tools::queue::queue_wait_found(plan.queue, job, started_at);
+                let response = Self::stamp_response_request_id(response, request_id);
+                Self::log_tool_ok("queue_wait", &plan.db_id, &response._meta, false);
+                return Ok(Json(response));
+            }
+
+            if Instant::now() >= timeout_at {
+                let response = tools::queue::queue_wait_timeout(plan.queue, started_at);
+                let response = Self::stamp_response_request_id(response, request_id);
+                Self::log_tool_ok("queue_wait", &plan.db_id, &response._meta, false);
+                return Ok(Json(response));
+            }
+
+            tokio::time::sleep(Duration::from_millis(plan.poll_interval_ms)).await;
+        }
     }
 
     #[tool(
