@@ -151,6 +151,7 @@ mod tests {
     use std::fs;
 
     use crate::adapters::embeddings::EmbeddingClient;
+    use crate::adapters::ort_runtime::initialize_ort_dylib_env;
     use crate::config::{EmbeddingConfig, EmbeddingProvider, RerankerConfig, RerankerProvider};
 
     use super::RerankerClient;
@@ -191,6 +192,8 @@ mod tests {
         let cache_dir =
             std::env::temp_dir().join(format!("sqlite-mcp-fastembed-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&cache_dir).expect("cache directory should be creatable");
+        initialize_ort_dylib_env(Some(cache_dir.clone()))
+            .expect("ORT runtime should initialize for real fastembed test");
 
         let embedding = EmbeddingClient::new(EmbeddingConfig {
             provider: EmbeddingProvider::Fastembed,
