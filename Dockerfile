@@ -1,6 +1,6 @@
 FROM rust:1-alpine AS builder
 WORKDIR /app
-RUN apk add --no-cache musl-dev
+RUN apk add --no-cache musl-dev openssl-dev pkgconfig
 ARG CARGO_FEATURES="vector"
 COPY . .
 RUN cargo build --release --features "$CARGO_FEATURES"
