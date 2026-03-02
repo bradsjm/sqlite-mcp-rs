@@ -15,7 +15,9 @@ use uuid::Uuid;
 
 use crate::config::AppConfig;
 use crate::contracts::common::ToolEnvelope;
-use crate::contracts::db::{DbListData, DbListRequest, DbMode, DbOpenData, DbOpenRequest};
+use crate::contracts::db::{
+    DbCloseData, DbCloseRequest, DbListData, DbListRequest, DbMode, DbOpenData, DbOpenRequest,
+};
 use crate::contracts::import::{DbImportData, DbImportRequest};
 use crate::contracts::sql::{
     SqlBatchData, SqlBatchRequest, SqlExecuteData, SqlExecuteRequest, SqlQueryData, SqlQueryRequest,
@@ -75,6 +77,7 @@ impl SqliteMcpServer {
                 &mut cursors,
                 request,
                 persist_root.as_deref(),
+                config.max_db_bytes,
             ) {
                 tracing::warn!(path, error = %error, "failed to bootstrap persisted default db");
             }
@@ -212,6 +215,7 @@ impl SqliteMcpServer {
             &mut cursors,
             request,
             self.persist_root.as_deref(),
+            self.config.max_db_bytes,
         ) {
             Ok(response) => response,
             Err(error) => {
@@ -237,7 +241,7 @@ impl SqliteMcpServer {
             &registry,
             request,
             self.persist_root.as_deref(),
-            self.config.max_rows,
+            self.config.max_persisted_list_entries,
         ) {
             Ok(response) => response,
             Err(error) => {
@@ -246,6 +250,29 @@ impl SqliteMcpServer {
             }
         };
         Self::log_tool_ok("db_list", crate::DEFAULT_DB_ID, &response._meta, false);
+        Ok(Json(response))
+    }
+
+    #[tool(name = "db_close", description = "Close an open SQLite database handle")]
+    async fn db_close(
+        &self,
+        Parameters(request): Parameters<DbCloseRequest>,
+    ) -> Result<Json<ToolEnvelope<DbCloseData>>, McpError> {
+        let started_at = Instant::now();
+        let resolved_db_id = request
+            .db_id
+            .clone()
+            .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
+        let mut registry = self.registry.lock().await;
+        let mut cursors = self.cursors.lock().await;
+        let response = match tools::db::db_close(&mut registry, &mut cursors, request) {
+            Ok(response) => response,
+            Err(error) => {
+                Self::log_tool_error("db_close", &resolved_db_id, started_at, &error);
+                return Err(Self::map_error(error));
+            }
+        };
+        Self::log_tool_ok("db_close", &resolved_db_id, &response._meta, false);
         Ok(Json(response))
     }
 

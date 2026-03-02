@@ -40,6 +40,19 @@ pub struct DbOpenData {
 pub struct DbListRequest {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DbCloseRequest {
+    #[serde(default)]
+    pub db_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DbCloseData {
+    pub db_id: String,
+    pub closed: bool,
+    pub active_db_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DbSummary {
     pub db_id: String,
     pub mode: DbMode,

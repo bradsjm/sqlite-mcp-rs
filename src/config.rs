@@ -15,6 +15,7 @@ pub struct AppConfig {
     pub max_rows: usize,
     pub max_bytes: usize,
     pub max_db_bytes: u64,
+    pub max_persisted_list_entries: usize,
     pub cursor_ttl_seconds: u64,
     pub cursor_capacity: usize,
     #[cfg(feature = "vector")]
@@ -73,6 +74,11 @@ impl AppConfig {
             max_rows: positive_usize(&lookup, "SQLITE_MAX_ROWS", 500)?,
             max_bytes: positive_usize(&lookup, "SQLITE_MAX_BYTES", 1_048_576)?,
             max_db_bytes: positive_u64(&lookup, "SQLITE_MAX_DB_BYTES", 100_000_000)?,
+            max_persisted_list_entries: positive_usize(
+                &lookup,
+                "SQLITE_MAX_PERSISTED_LIST_ENTRIES",
+                500,
+            )?,
             cursor_ttl_seconds: positive_u64(&lookup, "SQLITE_CURSOR_TTL_SECONDS", 600)?,
             cursor_capacity: positive_usize(&lookup, "SQLITE_CURSOR_CAPACITY", 500)?,
             #[cfg(feature = "vector")]
@@ -303,6 +309,7 @@ mod tests {
         assert_eq!(cfg.max_sql_length, 20_000);
         assert_eq!(cfg.max_statements, 50);
         assert_eq!(cfg.max_rows, 500);
+        assert_eq!(cfg.max_persisted_list_entries, 500);
         assert_eq!(cfg.log_level, "info");
     }
 

@@ -7,11 +7,13 @@ use rusqlite::Connection;
 #[cfg(feature = "vector")]
 use sqlite_vec::sqlite3_vec_init;
 
-use crate::DEFAULT_DB_ID;
-use crate::contracts::db::{DbListData, DbMode, DbOpenData, DbSummary, ExtensionsLoaded};
+use crate::contracts::db::{
+    DbCloseData, DbListData, DbMode, DbOpenData, DbSummary, ExtensionsLoaded,
+};
 use crate::errors::{AppError, AppResult};
+use crate::DEFAULT_DB_ID;
 
-use super::persistence::{list_persisted_entries, resolve_persist_path};
+use super::persistence::{enforce_db_size_limit, list_persisted_entries, resolve_persist_path};
 
 #[derive(Debug)]
 struct DbHandle {
@@ -43,6 +45,7 @@ impl DbRegistry {
         path: Option<String>,
         reset: bool,
         persist_root: Option<&Path>,
+        max_db_bytes: u64,
     ) -> AppResult<DbOpenData> {
         #[cfg(feature = "vector")]
         ensure_sqlite_vec_registered()?;
@@ -94,6 +97,8 @@ impl DbRegistry {
 
         let extensions_loaded = extension_flags(&connection);
 
+        enforce_db_size_limit(resolved_path.as_deref(), max_db_bytes)?;
+
         self.handles.insert(
             db_id.clone(),
             DbHandle {
@@ -110,6 +115,31 @@ impl DbRegistry {
             path: resolved_path.map(|path| path.to_string_lossy().to_string()),
             active: true,
             extensions_loaded,
+        })
+    }
+
+    pub fn close_db(&mut self, db_id: Option<&str>) -> AppResult<DbCloseData> {
+        let resolved_db_id = db_id.unwrap_or(&self.active_db_id).to_string();
+        if self.handles.remove(&resolved_db_id).is_none() {
+            return Err(AppError::NotFound(format!(
+                "unknown db_id: {resolved_db_id}"
+            )));
+        }
+
+        if self.handles.is_empty() {
+            self.active_db_id = DEFAULT_DB_ID.to_string();
+        } else if self.active_db_id == resolved_db_id {
+            if self.handles.contains_key(DEFAULT_DB_ID) {
+                self.active_db_id = DEFAULT_DB_ID.to_string();
+            } else if let Some(next_db_id) = self.handles.keys().min().cloned() {
+                self.active_db_id = next_db_id;
+            }
+        }
+
+        Ok(DbCloseData {
+            db_id: resolved_db_id,
+            closed: true,
+            active_db_id: self.active_db_id.clone(),
         })
     }
 
@@ -162,22 +192,25 @@ impl DbRegistry {
     }
 }
 
+#[cfg(feature = "vector")]
 fn extension_flags(connection: &Connection) -> ExtensionsLoaded {
     let vec_loaded = {
-        #[cfg(feature = "vector")]
-        {
-            connection
-                .query_row("select vec_version()", [], |row| row.get::<_, String>(0))
-                .is_ok()
-        }
-        #[cfg(not(feature = "vector"))]
-        {
-            false
-        }
+        connection
+            .query_row("select vec_version()", [], |row| row.get::<_, String>(0))
+            .is_ok()
     };
 
     ExtensionsLoaded {
         vec: vec_loaded,
+        rembed: false,
+        regex: false,
+    }
+}
+
+#[cfg(not(feature = "vector"))]
+fn extension_flags(_connection: &Connection) -> ExtensionsLoaded {
+    ExtensionsLoaded {
+        vec: false,
         rembed: false,
         regex: false,
     }
@@ -225,7 +258,14 @@ mod tests {
     fn opens_memory_db() {
         let mut registry = DbRegistry::default();
         let opened = registry
-            .open_db("default".to_string(), DbMode::Memory, None, false, None)
+            .open_db(
+                "default".to_string(),
+                DbMode::Memory,
+                None,
+                false,
+                None,
+                100_000_000,
+            )
             .expect("db should open");
         assert_eq!(opened.db_id, "default");
         let listed = registry.list(None, 100).expect("list should succeed");
@@ -241,6 +281,7 @@ mod tests {
             Some("db.sqlite".to_string()),
             false,
             None,
+            100_000_000,
         );
         assert!(result.is_err());
     }
@@ -255,7 +296,29 @@ mod tests {
             Some("main.db".to_string()),
             true,
             Some(root),
+            100_000_000,
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn closes_open_db() {
+        let mut registry = DbRegistry::default();
+        registry
+            .open_db(
+                "default".to_string(),
+                DbMode::Memory,
+                None,
+                false,
+                None,
+                100_000_000,
+            )
+            .expect("db should open");
+
+        let closed = registry
+            .close_db(Some("default"))
+            .expect("close should succeed");
+        assert!(closed.closed);
+        assert_eq!(closed.db_id, "default");
     }
 }

@@ -416,7 +416,14 @@ mod tests {
     fn setup_registry() -> DbRegistry {
         let mut registry = DbRegistry::default();
         registry
-            .open_db("default".to_string(), DbMode::Memory, None, false, None)
+            .open_db(
+                "default".to_string(),
+                DbMode::Memory,
+                None,
+                false,
+                None,
+                u64::MAX,
+            )
             .expect("memory db should open");
         let connection = registry
             .get_connection(Some("default"))
