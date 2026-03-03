@@ -1,3 +1,8 @@
+//! Database registry for managing SQLite connections.
+//!
+//! The registry maintains a collection of open database handles and provides
+//! operations for opening, closing, and listing databases.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "vector")]
@@ -15,16 +20,27 @@ use crate::errors::{AppError, AppResult};
 
 use super::persistence::{enforce_db_size_limit, list_persisted_entries, resolve_persist_path};
 
+/// Internal handle for an open database connection.
 #[derive(Debug)]
 struct DbHandle {
+    /// SQLite connection.
     connection: Connection,
+    /// Storage mode (memory or persisted).
     mode: DbMode,
+    /// File path for persisted databases.
     path: Option<PathBuf>,
 }
 
+/// Registry for managing open database connections.
+///
+/// Maintains a map of database identifiers to their connections,
+/// with one database designated as "active" for operations that
+/// don't specify a database explicitly.
 #[derive(Debug)]
 pub struct DbRegistry {
+    /// Currently active database identifier.
     active_db_id: String,
+    /// Map of database identifiers to their handles.
     handles: HashMap<String, DbHandle>,
 }
 
@@ -38,6 +54,24 @@ impl Default for DbRegistry {
 }
 
 impl DbRegistry {
+    /// Opens a database connection with the specified parameters.
+    ///
+    /// If the database is already open with different parameters and `reset` is false,
+    /// returns a conflict error. If `reset` is true, closes the existing connection first.
+    ///
+    /// # Arguments
+    ///
+    /// * `db_id` - Unique identifier for the database
+    /// * `mode` - Storage mode (memory or persisted)
+    /// * `path` - File path for persisted databases (relative to persist_root)
+    /// * `reset` - Whether to replace an existing open database
+    /// * `persist_root` - Root directory for persisted databases
+    /// * `max_db_bytes` - Maximum allowed database file size
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Conflict`] if database is open with different parameters
+    /// and reset is false. Returns various errors for filesystem or SQLite issues.
     pub fn open_db(
         &mut self,
         db_id: String,
@@ -118,6 +152,18 @@ impl DbRegistry {
         })
     }
 
+    /// Closes a database connection.
+    ///
+    /// If no database ID is specified, closes the active database.
+    /// Updates the active database to another open database if available.
+    ///
+    /// # Arguments
+    ///
+    /// * `db_id` - Optional database identifier (defaults to active database)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NotFound`] if the database is not open.
     pub fn close_db(&mut self, db_id: Option<&str>) -> AppResult<DbCloseData> {
         let resolved_db_id = db_id.unwrap_or(&self.active_db_id).to_string();
         if self.handles.remove(&resolved_db_id).is_none() {
@@ -143,6 +189,15 @@ impl DbRegistry {
         })
     }
 
+    /// Lists open databases and persisted database files.
+    ///
+    /// Returns information about all open database handles and scans
+    /// the persistence root for persisted database files.
+    ///
+    /// # Arguments
+    ///
+    /// * `persist_root` - Root directory for persisted databases
+    /// * `persisted_limit` - Maximum number of persisted files to list
     pub fn list(
         &self,
         persist_root: Option<&Path>,
@@ -174,6 +229,15 @@ impl DbRegistry {
         })
     }
 
+    /// Returns a reference to the SQLite connection for the specified database.
+    ///
+    /// # Arguments
+    ///
+    /// * `db_id` - Optional database identifier (defaults to active database)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NotFound`] if the database is not open.
     pub fn get_connection(&self, db_id: Option<&str>) -> AppResult<&Connection> {
         let resolved_db_id = db_id.unwrap_or(&self.active_db_id);
         self.handles
@@ -182,6 +246,19 @@ impl DbRegistry {
             .ok_or_else(|| AppError::NotFound(format!("unknown db_id: {resolved_db_id}")))
     }
 
+    /// Returns the file path for a persisted database.
+    ///
+    /// # Arguments
+    ///
+    /// * `db_id` - Optional database identifier (defaults to active database)
+    ///
+    /// # Returns
+    ///
+    /// `Some(PathBuf)` for persisted databases, `None` for in-memory databases.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NotFound`] if the database is not open.
     pub fn persisted_path(&self, db_id: Option<&str>) -> AppResult<Option<PathBuf>> {
         let resolved_db_id = db_id.unwrap_or(&self.active_db_id);
         let handle = self

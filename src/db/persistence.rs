@@ -1,8 +1,27 @@
+//! Database persistence utilities.
+//!
+//! Provides path resolution, persisted database listing, and size limit enforcement.
+
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::errors::AppError;
 
+/// Resolves a requested persistence path within the persistence root.
+///
+/// Validates that the path:
+/// - Is not empty
+/// - Does not contain parent directory references ("..")
+/// - Remains within the persistence root directory
+///
+/// # Arguments
+///
+/// * `persist_root` - Root directory for persisted databases
+/// * `requested_path` - Requested path (relative or absolute)
+///
+/// # Errors
+///
+/// Returns [`AppError::InvalidInput`] for invalid paths.
 pub fn resolve_persist_path(
     persist_root: &Path,
     requested_path: &str,
@@ -57,6 +76,20 @@ pub fn resolve_persist_path(
     Ok(canonical_candidate)
 }
 
+/// Lists persisted database files in the persistence root.
+///
+/// Recursively scans the persistence directory and returns relative paths
+/// to all database files found, sorted alphabetically.
+///
+/// # Arguments
+///
+/// * `persist_root` - Root directory to scan
+/// * `limit` - Maximum number of entries to return
+///
+/// # Returns
+///
+/// Tuple of (entries, truncated) where entries are relative paths and
+/// truncated indicates if more entries exist beyond the limit.
 pub fn list_persisted_entries(
     persist_root: &Path,
     limit: usize,
@@ -116,6 +149,20 @@ pub fn list_persisted_entries(
     Ok((entries, truncated))
 }
 
+/// Enforces the maximum database file size limit.
+///
+/// Checks the size of the database file and returns an error if it exceeds
+/// the configured limit. This is called after write operations to prevent
+/// databases from growing too large.
+///
+/// # Arguments
+///
+/// * `path` - Optional path to the database file (None for in-memory databases)
+/// * `max_db_bytes` - Maximum allowed file size in bytes
+///
+/// # Errors
+///
+/// Returns [`AppError::LimitExceeded`] if the database exceeds the size limit.
 pub fn enforce_db_size_limit(path: Option<&Path>, max_db_bytes: u64) -> Result<(), AppError> {
     let Some(path) = path else {
         return Ok(());

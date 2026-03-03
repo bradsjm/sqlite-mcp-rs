@@ -1,3 +1,8 @@
+//! Response finalization utilities.
+//!
+//! Provides functions for creating standardized tool response envelopes
+//! with timing, metadata, and request tracking.
+
 use std::time::Instant;
 
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -5,6 +10,23 @@ use uuid::Uuid;
 
 use crate::contracts::common::{ToolEnvelope, ToolHint, ToolMeta};
 
+/// Creates a finalized tool response envelope.
+///
+/// Wraps the response data with a summary, metadata including timing
+/// and request ID, and optional hints for follow-up actions.
+///
+/// # Arguments
+///
+/// * `summary` - Human-readable summary of the operation result
+/// * `data` - Response data payload
+/// * `started_at` - Instant when the operation started (for elapsed time)
+/// * `hints` - Suggested follow-up tool calls
+/// * `truncated` - Whether results were truncated
+/// * `next_cursor` - Cursor for fetching the next page
+///
+/// # Returns
+///
+/// A [`ToolEnvelope`] containing the data and all metadata.
 pub fn finalize_tool<T>(
     summary: impl Into<String>,
     data: T,

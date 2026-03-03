@@ -1,3 +1,8 @@
+//! Application configuration from environment variables.
+//!
+//! This module provides configuration structures and parsing logic for
+//! all server settings, loaded from environment variables with sensible defaults.
+
 use std::path::PathBuf;
 
 use crate::errors::AppError;
@@ -6,67 +11,122 @@ use fastembed::RerankerModel;
 #[cfg(feature = "vector")]
 use fastembed::{EmbeddingModel, ModelTrait};
 
+/// Application configuration loaded from environment variables.
+///
+/// All fields have sensible defaults and can be overridden via environment
+/// variables with the `SQLITE_` prefix.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
+    /// Root directory for persisted databases (SQLITE_PERSIST_ROOT).
     pub persist_root: Option<PathBuf>,
+    /// Log level for tracing (SQLITE_LOG_LEVEL, default: "info").
     pub log_level: String,
+    /// Maximum SQL statement length in characters (SQLITE_MAX_SQL_LENGTH, default: 20_000).
     pub max_sql_length: usize,
+    /// Maximum statements per batch (SQLITE_MAX_STATEMENTS, default: 50).
     pub max_statements: usize,
+    /// Maximum rows returned per query (SQLITE_MAX_ROWS, default: 500).
     pub max_rows: usize,
+    /// Maximum response size in bytes (SQLITE_MAX_BYTES, default: 1_048_576).
     pub max_bytes: usize,
+    /// Maximum database file size in bytes (SQLITE_MAX_DB_BYTES, default: 100_000_000).
     pub max_db_bytes: u64,
+    /// Maximum entries in persisted database list (SQLITE_MAX_PERSISTED_LIST_ENTRIES, default: 500).
     pub max_persisted_list_entries: usize,
+    /// Cursor time-to-live in seconds (SQLITE_CURSOR_TTL_SECONDS, default: 600).
     pub cursor_ttl_seconds: u64,
+    /// Maximum number of cursors to store (SQLITE_CURSOR_CAPACITY, default: 500).
     pub cursor_capacity: usize,
+    /// Default queue wait timeout in milliseconds (SQLITE_QUEUE_WAIT_TIMEOUT_MS_DEFAULT, default: 30_000).
     pub queue_wait_timeout_ms_default: u64,
+    /// Maximum queue wait timeout in milliseconds (SQLITE_QUEUE_WAIT_TIMEOUT_MS_MAX, default: 120_000).
     pub queue_wait_timeout_ms_max: u64,
+    /// Default poll interval for queue waits in milliseconds (SQLITE_QUEUE_POLL_INTERVAL_MS_DEFAULT, default: 250).
     pub queue_poll_interval_ms_default: u64,
+    /// Minimum poll interval for queue waits in milliseconds (SQLITE_QUEUE_POLL_INTERVAL_MS_MIN, default: 50).
     pub queue_poll_interval_ms_min: u64,
+    /// Maximum poll interval for queue waits in milliseconds (SQLITE_QUEUE_POLL_INTERVAL_MS_MAX, default: 5_000).
     pub queue_poll_interval_ms_max: u64,
+    /// Maximum top-k results for vector search (SQLITE_MAX_VECTOR_TOP_K, default: 200).
     #[cfg(feature = "vector")]
     pub max_vector_top_k: usize,
+    /// Maximum fetch-k for reranking (SQLITE_MAX_RERANK_FETCH_K, default: 500).
     #[cfg(feature = "vector")]
     pub max_rerank_fetch_k: usize,
+    /// Embedding model configuration.
     #[cfg(feature = "vector")]
     pub embedding: EmbeddingConfig,
+    /// Optional reranker configuration.
     #[cfg(feature = "vector")]
     pub reranker: Option<RerankerConfig>,
 }
 
+/// Configuration for text embedding models.
 #[cfg(feature = "vector")]
 #[derive(Debug, Clone)]
 pub struct EmbeddingConfig {
+    /// Provider for embedding generation.
     pub provider: EmbeddingProvider,
+    /// Model identifier (e.g., "BAAI/bge-small-en-v1.5").
     pub model: String,
+    /// Optional cache directory for model files.
     pub cache_dir: Option<PathBuf>,
+    /// Embedding dimension size.
     pub dimension: usize,
 }
 
+/// Supported embedding providers.
 #[cfg(feature = "vector")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingProvider {
+    /// FastEmbed provider for local embedding generation.
     Fastembed,
 }
 
+/// Configuration for reranking models.
 #[cfg(feature = "vector")]
 #[derive(Debug, Clone)]
 pub struct RerankerConfig {
+    /// Provider for reranking.
     pub provider: RerankerProvider,
+    /// Model identifier (e.g., "BAAI/bge-reranker-base").
     pub model: String,
+    /// Optional cache directory for model files.
     pub cache_dir: Option<PathBuf>,
 }
 
+/// Supported reranker providers.
 #[cfg(feature = "vector")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RerankerProvider {
+    /// FastEmbed provider for local reranking.
     Fastembed,
 }
 
 impl AppConfig {
+    /// Loads configuration from environment variables.
+    ///
+    /// Environment variables are prefixed with `SQLITE_` and documented
+    /// on each field of [`AppConfig`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::InvalidInput`] if any configuration value is invalid.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqlite_mcp_rs::config::AppConfig;
+    ///
+    /// let config = AppConfig::from_env()?;
+    /// ```
     pub fn from_env() -> Result<Self, AppError> {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
 
+    /// Loads configuration using a custom lookup function.
+    ///
+    /// This is primarily used for testing with mock environment variables.
     fn from_lookup<F>(lookup: F) -> Result<Self, AppError>
     where
         F: Fn(&str) -> Option<String>,
@@ -124,6 +184,9 @@ impl AppConfig {
         Ok(config)
     }
 
+    /// Validates that queue wait configuration bounds are consistent.
+    ///
+    /// Ensures default values fall within min/max bounds.
     fn validate_queue_wait_bounds(&self) -> Result<(), AppError> {
         if self.queue_wait_timeout_ms_default > self.queue_wait_timeout_ms_max {
             return Err(AppError::InvalidInput(

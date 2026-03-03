@@ -1,16 +1,35 @@
+//! SQL policy validation and security scanning.
+//!
+//! This module provides SQL statement validation, security scanning, and policy
+//! enforcement to prevent dangerous operations and enforce resource limits.
+
 use crate::contracts::sql::BatchStatement;
 use crate::errors::{AppError, AppResult};
 
+/// SQL policy configuration for validation and resource limits.
+///
+/// Defines constraints on SQL operations including statement length,
+/// result size limits, and database size limits.
 #[derive(Debug, Clone)]
 pub struct SqlPolicy {
+    /// Maximum allowed SQL statement length in characters.
     pub max_sql_length: usize,
+    /// Maximum number of statements allowed in a batch.
     pub max_statements: usize,
+    /// Maximum number of rows to return per query.
     pub max_rows: usize,
+    /// Maximum response size in bytes.
     pub max_bytes: usize,
+    /// Maximum database file size in bytes.
     pub max_db_bytes: u64,
 }
 
 impl SqlPolicy {
+    /// Validates that SQL statement length is within configured limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::LimitExceeded`] if the SQL exceeds `max_sql_length`.
     pub fn validate_sql_length(&self, sql: &str) -> AppResult<()> {
         if sql.len() > self.max_sql_length {
             return Err(AppError::LimitExceeded(format!(
@@ -22,6 +41,10 @@ impl SqlPolicy {
     }
 }
 
+/// Splits a SQL string into individual statements.
+///
+/// Handles quoted strings, comments, and semicolons correctly.
+/// Returns a vector of trimmed SQL statements.
 pub fn split_sql_statements(sql: &str) -> Vec<String> {
     let mut state = ScanState::Normal;
     let mut start = 0usize;
@@ -100,6 +123,10 @@ pub fn split_sql_statements(sql: &str) -> Vec<String> {
     statements
 }
 
+/// Checks if SQL contains blocked statements (ATTACH, LOAD_EXTENSION).
+///
+/// Returns true if the SQL contains any blocked statements that could
+/// compromise security or access unauthorized resources.
 pub fn contains_blocked_sql(sql: &str) -> bool {
     split_sql_statements(sql).iter().any(|statement| {
         let normalized = normalize_sql_outside_literals(statement);
@@ -107,11 +134,19 @@ pub fn contains_blocked_sql(sql: &str) -> bool {
     })
 }
 
+/// Checks if SQL references a protected table name.
+///
+/// Protected tables (like `_vector_collections`) should not be modified
+/// directly through SQL to maintain data integrity.
 pub fn contains_protected_table_reference(sql: &str, table: &str) -> bool {
     let normalized = normalize_sql_outside_literals(sql);
     contains_identifier_token(&normalized, &table.to_ascii_uppercase())
 }
 
+/// Checks if a batch of statements appears destructive.
+///
+/// Destructive operations include DROP, TRUNCATE, and DELETE without WHERE clauses.
+/// These require explicit confirmation via `confirm_destructive` flag.
 pub fn looks_destructive_batch(statements: &[BatchStatement]) -> bool {
     statements.iter().any(|statement| {
         let normalized = statement.sql.trim().to_ascii_uppercase();
@@ -123,6 +158,11 @@ pub fn looks_destructive_batch(statements: &[BatchStatement]) -> bool {
     })
 }
 
+/// Validates that a string is a valid SQL identifier.
+///
+/// Valid identifiers start with a letter or underscore and contain only
+/// alphanumeric characters and underscores. They must match the pattern
+/// `^[A-Za-z_][A-Za-z0-9_]*$`.
 pub fn is_valid_identifier(identifier: &str) -> bool {
     let mut chars = identifier.chars();
     let Some(first) = chars.next() else {
