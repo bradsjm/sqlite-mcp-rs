@@ -28,3 +28,4 @@
 # Temp
 
 .tmp/
+.fastembed_cache/

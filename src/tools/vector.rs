@@ -109,7 +109,7 @@ pub fn vector_status(
     let embedding = VectorBackendStatus {
         provider: embedding_provider_name(runtime).to_string(),
         model: runtime.embedding.model().to_string(),
-        dimension: Some(runtime.embedding.dimension()),
+        dimension: runtime.embedding.dimension(),
         cache_dir: runtime
             .embedding
             .cache_dir_path()
@@ -118,16 +118,32 @@ pub fn vector_status(
         issues: embedding_issues,
     };
 
-    let reranker = runtime.reranker.as_ref().map(|client| VectorBackendStatus {
-        provider: reranker_provider_name(client).to_string(),
-        model: client.model().to_string(),
-        dimension: None,
-        cache_dir: client
-            .cache_dir_path()
-            .map(|path| path.display().to_string()),
-        ready: reranker_issues.is_empty(),
-        issues: reranker_issues,
-    });
+    let reranker = if let Some(client) = runtime.reranker.as_ref() {
+        VectorBackendStatus {
+            provider: reranker_provider_name(client).to_string(),
+            model: client.model().to_string(),
+            dimension: 0,
+            cache_dir: client
+                .cache_dir_path()
+                .map(|path| path.display().to_string()),
+            ready: reranker_issues.is_empty(),
+            issues: reranker_issues,
+        }
+    } else {
+        VectorBackendStatus {
+            provider: "none".to_string(),
+            model: "not_configured".to_string(),
+            dimension: 0,
+            cache_dir: None,
+            ready: false,
+            issues: vec![VectorIssue {
+                stage: "reranker_init".to_string(),
+                code: "RERANK_UNAVAILABLE".to_string(),
+                message: "no reranker provider is configured".to_string(),
+                retryable: false,
+            }],
+        }
+    };
 
     let mut hints = Vec::new();
     if !ort_issues.is_empty() {
@@ -142,7 +158,7 @@ pub fn vector_status(
         });
     }
 
-    let summary = if embedding.ready && reranker.as_ref().is_none_or(|status| status.ready) {
+    let summary = if embedding.ready && reranker.ready {
         "Vector runtime is ready."
     } else {
         "Vector runtime is not fully ready."
@@ -355,7 +371,7 @@ pub fn vector_upsert(
         .map_err(|error| vector_dependency_error("embedding_init", runtime, error))?;
 
     let collection = load_collection(connection, &request.collection)?;
-    let conflict_mode = request.on_conflict.unwrap_or(VectorConflictMode::Replace);
+    let conflict_mode = request.on_conflict;
     let mut upserted_count = 0usize;
     let mut skipped_count = 0usize;
 
@@ -511,7 +527,7 @@ pub fn vector_search(
         )));
     }
 
-    let rerank_mode = request.rerank.unwrap_or(RerankMode::Off);
+    let rerank_mode = request.rerank;
     let fetch_k = request.rerank_fetch_k.unwrap_or(top_k);
     if fetch_k == 0 {
         return Err(AppError::InvalidInput(
@@ -580,7 +596,7 @@ pub fn vector_search(
 
     let mut issues = Vec::new();
     let mut reranked = false;
-    let mut rerank_model = None;
+    let mut rerank_model = String::new();
 
     let mut selected: Vec<SearchCandidate> = if rerank_mode == RerankMode::On {
         candidates.iter().take(fetch_k).cloned().collect()
@@ -626,7 +642,7 @@ pub fn vector_search(
                         });
                         selected.truncate(top_k);
                         reranked = true;
-                        rerank_model = Some(reranker.model().to_string());
+                        rerank_model = reranker.model().to_string();
                     }
                 }
                 Err(error) => {
@@ -834,8 +850,8 @@ mod tests {
     use crate::config::{EmbeddingConfig, EmbeddingProvider, RerankerConfig, RerankerProvider};
     use crate::contracts::db::DbMode;
     use crate::contracts::vector::{
-        RerankMode, VectorCollectionCreateRequest, VectorDocument, VectorSearchRequest,
-        VectorStatusRequest, VectorUpsertRequest,
+        RerankMode, VectorCollectionCreateRequest, VectorConflictMode, VectorDocument,
+        VectorSearchRequest, VectorStatusRequest, VectorUpsertRequest,
     };
     use crate::db::registry::DbRegistry;
     use crate::errors::AppError;
@@ -913,7 +929,7 @@ mod tests {
             VectorUpsertRequest {
                 db_id: None,
                 collection: "items".to_string(),
-                on_conflict: None,
+                on_conflict: VectorConflictMode::Replace,
                 items: vec![
                     VectorDocument {
                         id: "a".to_string(),
@@ -946,7 +962,7 @@ mod tests {
                 include_text: true,
                 include_metadata: true,
                 filter: Some(filter),
-                rerank: Some(RerankMode::Off),
+                rerank: RerankMode::Off,
                 rerank_fetch_k: None,
             },
             200,
@@ -997,7 +1013,7 @@ mod tests {
             VectorUpsertRequest {
                 db_id: None,
                 collection: "items".to_string(),
-                on_conflict: None,
+                on_conflict: VectorConflictMode::Replace,
                 items: vec![VectorDocument {
                     id: "a".to_string(),
                     text: "doc-alpha".to_string(),
@@ -1047,7 +1063,7 @@ mod tests {
             VectorUpsertRequest {
                 db_id: None,
                 collection: "items".to_string(),
-                on_conflict: None,
+                on_conflict: VectorConflictMode::Replace,
                 items: vec![
                     VectorDocument {
                         id: "a".to_string(),
@@ -1076,7 +1092,7 @@ mod tests {
                 include_text: false,
                 include_metadata: false,
                 filter: None,
-                rerank: Some(RerankMode::On),
+                rerank: RerankMode::On,
                 rerank_fetch_k: Some(2),
             },
             200,
@@ -1121,7 +1137,7 @@ mod tests {
             VectorUpsertRequest {
                 db_id: None,
                 collection: "items".to_string(),
-                on_conflict: None,
+                on_conflict: VectorConflictMode::Replace,
                 items: vec![
                     VectorDocument {
                         id: "a".to_string(),
@@ -1150,7 +1166,7 @@ mod tests {
                 include_text: false,
                 include_metadata: false,
                 filter: None,
-                rerank: Some(RerankMode::On),
+                rerank: RerankMode::On,
                 rerank_fetch_k: Some(2),
             },
             200,
@@ -1159,10 +1175,7 @@ mod tests {
         .expect("search should succeed");
 
         assert!(searched.data.reranked);
-        assert_eq!(
-            searched.data.rerank_model.as_deref(),
-            Some("BAAI/bge-reranker-base")
-        );
+        assert_eq!(searched.data.rerank_model, "BAAI/bge-reranker-base");
         assert!(searched.data.issues.is_empty());
         assert_eq!(searched.data.matches.len(), 1);
         assert_eq!(searched.data.matches[0].id, "b");
@@ -1199,7 +1212,7 @@ mod tests {
             VectorUpsertRequest {
                 db_id: None,
                 collection: "items".to_string(),
-                on_conflict: None,
+                on_conflict: VectorConflictMode::Replace,
                 items: vec![VectorDocument {
                     id: "a".to_string(),
                     text: "doc-alpha".to_string(),
@@ -1221,7 +1234,7 @@ mod tests {
                 include_text: false,
                 include_metadata: false,
                 filter: None,
-                rerank: Some(RerankMode::Off),
+                rerank: RerankMode::Off,
                 rerank_fetch_k: None,
             },
             50,
@@ -1267,7 +1280,7 @@ mod tests {
             VectorUpsertRequest {
                 db_id: None,
                 collection: "items".to_string(),
-                on_conflict: None,
+                on_conflict: VectorConflictMode::Replace,
                 items: vec![VectorDocument {
                     id: "a".to_string(),
                     text: "doc-alpha".to_string(),
@@ -1289,7 +1302,7 @@ mod tests {
                 include_text: false,
                 include_metadata: false,
                 filter: None,
-                rerank: Some(RerankMode::On),
+                rerank: RerankMode::On,
                 rerank_fetch_k: Some(3),
             },
             50,
@@ -1326,7 +1339,8 @@ mod tests {
         assert!(status.data.prewarm_attempted);
         assert!(status.data.embedding.ready);
         assert!(status.data.embedding.issues.is_empty());
-        assert!(status.data.reranker.is_none());
+        assert!(!status.data.reranker.ready);
+        assert_eq!(status.data.reranker.provider, "none");
     }
 
     #[test]
@@ -1350,11 +1364,7 @@ mod tests {
         assert_eq!(status.data.db_id, "test_db");
         assert!(status.data.embedding.ready);
         assert!(status.data.embedding.issues.is_empty());
-        let reranker = status
-            .data
-            .reranker
-            .as_ref()
-            .expect("reranker status should be present");
+        let reranker = &status.data.reranker;
         assert!(reranker.ready);
         assert!(reranker.issues.is_empty());
     }

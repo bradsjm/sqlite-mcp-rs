@@ -28,7 +28,9 @@ pub struct VectorCollectionListRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct VectorCollectionSummary {
     pub collection: String,
+    #[schemars(schema_with = "crate::contracts::schema::usize_schema")]
     pub docs_count: usize,
+    #[schemars(schema_with = "crate::contracts::schema::usize_schema")]
     pub dimension: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_updated: Option<String>,
@@ -51,8 +53,8 @@ pub struct VectorStatusRequest {
 pub struct VectorBackendStatus {
     pub provider: String,
     pub model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dimension: Option<usize>,
+    #[schemars(schema_with = "crate::contracts::schema::usize_schema")]
+    pub dimension: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_dir: Option<String>,
     pub ready: bool,
@@ -68,13 +70,13 @@ pub struct VectorStatusData {
     pub ort_dylib_path: Option<String>,
     pub prewarm_attempted: bool,
     pub embedding: VectorBackendStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reranker: Option<VectorBackendStatus>,
+    pub reranker: VectorBackendStatus,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum VectorConflictMode {
+    #[default]
     Replace,
     Ignore,
     UpdateMetadata,
@@ -94,19 +96,22 @@ pub struct VectorUpsertRequest {
     pub db_id: Option<String>,
     pub collection: String,
     #[serde(default)]
-    pub on_conflict: Option<VectorConflictMode>,
+    pub on_conflict: VectorConflictMode,
     pub items: Vec<VectorDocument>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct VectorUpsertData {
+    #[schemars(schema_with = "crate::contracts::schema::usize_schema")]
     pub upserted_count: usize,
+    #[schemars(schema_with = "crate::contracts::schema::usize_schema")]
     pub skipped_count: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RerankMode {
+    #[default]
     Off,
     On,
 }
@@ -118,6 +123,7 @@ pub struct VectorSearchRequest {
     pub collection: String,
     pub query_text: String,
     #[serde(default)]
+    #[schemars(schema_with = "crate::contracts::schema::optional_usize_schema")]
     pub top_k: Option<usize>,
     #[serde(default)]
     pub include_text: bool,
@@ -126,8 +132,9 @@ pub struct VectorSearchRequest {
     #[serde(default)]
     pub filter: Option<serde_json::Map<String, Value>>,
     #[serde(default)]
-    pub rerank: Option<RerankMode>,
+    pub rerank: RerankMode,
     #[serde(default)]
+    #[schemars(schema_with = "crate::contracts::schema::optional_usize_schema")]
     pub rerank_fetch_k: Option<usize>,
 }
 
@@ -156,8 +163,7 @@ pub struct VectorSearchData {
     pub matches: Vec<VectorMatch>,
     pub truncated: bool,
     pub reranked: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rerank_model: Option<String>,
+    pub rerank_model: String,
     #[serde(default)]
     pub issues: Vec<VectorIssue>,
 }

@@ -20,6 +20,9 @@ SQLITE_HTTP_SERVER_URL="${SQLITE_HTTP_SERVER_URL:-http://${SQLITE_HTTP_HOST}:${S
 
 SQLITE_INSPECTOR_DB_PATH="${SQLITE_INSPECTOR_DB_PATH:-inspector/seed.db}"
 SQLITE_INSPECTOR_SEED_SQL="${SQLITE_INSPECTOR_SEED_SQL:-$REPO_ROOT/tests/fixtures/sqlite-inspector-seed.sql}"
+SQLITE_RERANKER_PROVIDER="${SQLITE_RERANKER_PROVIDER:-fastembed}"
+SQLITE_RERANKER_MODEL="${SQLITE_RERANKER_MODEL:-BAAI/bge-reranker-base}"
+SQLITE_MODEL_CACHE_DIR="${SQLITE_MODEL_CACHE_DIR:-$REPO_ROOT/.inspector-cache/huggingface}"
 
 if [[ "$#" -eq 0 ]]; then
   echo "usage: scripts/test-sqlite-mcp-inspector-http.sh <mcp-server-command> [args...]" >&2
@@ -163,6 +166,10 @@ start_server() {
   SQLITE_MAX_DB_BYTES="$SQLITE_MAX_DB_BYTES" \
   SQLITE_CURSOR_TTL_SECONDS="$SQLITE_CURSOR_TTL_SECONDS" \
   SQLITE_CURSOR_CAPACITY="$SQLITE_CURSOR_CAPACITY" \
+  SQLITE_RERANKER_PROVIDER="$SQLITE_RERANKER_PROVIDER" \
+  SQLITE_RERANKER_MODEL="$SQLITE_RERANKER_MODEL" \
+  SQLITE_EMBEDDING_CACHE_DIR="$SQLITE_MODEL_CACHE_DIR" \
+  SQLITE_RERANKER_CACHE_DIR="$SQLITE_MODEL_CACHE_DIR" \
   "${SERVER_COMMAND[@]}" --transport http --host "$SQLITE_HTTP_HOST" --port "$SQLITE_HTTP_PORT" >"$SERVER_LOG_PATH" 2>&1 &
   SERVER_PID="$!"
 }
@@ -198,6 +205,15 @@ run_tests() {
   local batch_json
   local create_import_table_json
   local import_json
+  local vector_status_json
+  local vector_create_json
+  local vector_upsert_json
+  local vector_list_json
+  local vector_search_json
+  local vector_rerank_json
+  local has_vector_tools
+  local vector_status_err
+  local vector_run_id
 
   echo "Checking MCP tool discovery over HTTP"
   tools_json=$(run_inspector --method tools/list)
@@ -212,6 +228,17 @@ run_tests() {
     and ($names | index("queue_push") != null)
     and ($names | index("queue_wait") != null)
   '
+
+  has_vector_tools=$(printf '%s\n' "$tools_json" | jq -r '
+    ((.tools // .result.tools // []) | map(.name)) as $names
+    | if (($names | index("vector_status") != null)
+      and ($names | index("vector_collection_create") != null)
+      and ($names | index("vector_upsert") != null)
+      and ($names | index("vector_search") != null)
+      and ($names | index("vector_collection_list") != null))
+      then "true" else "false" end
+  ')
+  vector_run_id=$(date +%s)
 
   echo "Checking default database bootstrap over HTTP"
   initial_list_json=$(run_inspector --method tools/call --tool-name db_list)
@@ -302,6 +329,105 @@ run_tests() {
     (.isError != true)
     and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).rows_inserted == 2)
   '
+
+  if [[ "$has_vector_tools" == "true" ]]; then
+    echo "Pre-downloading vector and reranker models"
+    HF_CACHE_DIR="$SQLITE_MODEL_CACHE_DIR" bash "$REPO_ROOT/scripts/download-models.sh"
+
+    echo "Running vector_status over HTTP"
+    vector_status_err=$(mktemp)
+    if ! vector_status_json=$(run_inspector \
+      --method tools/call \
+      --tool-name vector_status \
+      --tool-arg "db_id=${active_db_id}" \
+      --tool-arg prewarm=true 2>"$vector_status_err"); then
+      vector_status_json=$(cat "$vector_status_err")
+      if [[ "$vector_status_json" == *"vector feature is not enabled"* ]]; then
+        echo "Vector tools are listed but vector feature is disabled at runtime; skipping vector/embedding/reranking HTTP checks"
+        vector_status_json=""
+      else
+        echo "$vector_status_json" >&2
+        rm -f "$vector_status_err"
+        exit 1
+      fi
+    fi
+    rm -f "$vector_status_err"
+
+    if [[ -n "$vector_status_json" ]]; then
+    assert_json "$vector_status_json" '
+      (.isError != true)
+      and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).embedding.ready == true)
+      and (((.structuredContent.data // .data // .result.structuredContent.data // .result.data).reranker // {"ready": false}).ready == true)
+    '
+
+    echo "Creating vector collection over HTTP"
+    vector_create_json=$(run_inspector \
+      --method tools/call \
+      --tool-name vector_collection_create \
+      --tool-arg "db_id=${active_db_id}" \
+      --tool-arg collection=http_inspector_vectors \
+      --tool-arg if_not_exists=true)
+    assert_json "$vector_create_json" '(.isError != true)'
+
+    echo "Upserting vector documents over HTTP"
+    vector_upsert_json=$(run_inspector \
+      --method tools/call \
+      --tool-name vector_upsert \
+      --tool-arg "db_id=${active_db_id}" \
+      --tool-arg collection=http_inspector_vectors \
+      --tool-arg on_conflict=replace \
+      --tool-arg "items=[{\"id\":\"${vector_run_id}_doc_a\",\"text\":\"SQLite stores structured records in local files.\",\"metadata\":{\"topic\":\"db\"}},{\"id\":\"${vector_run_id}_doc_b\",\"text\":\"Embeddings map text into vector space.\",\"metadata\":{\"topic\":\"ml\"}},{\"id\":\"${vector_run_id}_doc_c\",\"text\":\"Reranking improves final retrieval quality.\",\"metadata\":{\"topic\":\"search\"}}]")
+    assert_json "$vector_upsert_json" '
+      (.isError != true)
+      and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).upserted_count == 3)
+    '
+
+    echo "Listing vector collections over HTTP"
+    vector_list_json=$(run_inspector \
+      --method tools/call \
+      --tool-name vector_collection_list \
+      --tool-arg "db_id=${active_db_id}")
+    assert_json "$vector_list_json" '
+      (.isError != true)
+      and (((.structuredContent.data // .data // .result.structuredContent.data // .result.data).collections // [])
+        | map(select(.collection == "http_inspector_vectors"))
+        | length) == 1
+    '
+
+    echo "Searching vectors with embedding similarity over HTTP"
+    vector_search_json=$(run_inspector \
+      --method tools/call \
+      --tool-name vector_search \
+      --tool-arg "db_id=${active_db_id}" \
+      --tool-arg collection=http_inspector_vectors \
+      --tool-arg 'query_text=How do embeddings represent text?' \
+      --tool-arg top_k=2 \
+      --tool-arg include_text=true)
+    assert_json "$vector_search_json" '
+      (.isError != true)
+      and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).matches | length) >= 1
+    '
+
+    echo "Searching vectors with reranking over HTTP"
+    vector_rerank_json=$(run_inspector \
+      --method tools/call \
+      --tool-name vector_search \
+      --tool-arg "db_id=${active_db_id}" \
+      --tool-arg collection=http_inspector_vectors \
+      --tool-arg 'query_text=Which item talks about reranking?' \
+      --tool-arg top_k=2 \
+      --tool-arg rerank=on \
+      --tool-arg rerank_fetch_k=3 \
+      --tool-arg include_text=true)
+    assert_json "$vector_rerank_json" '
+      (.isError != true)
+      and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).reranked == true)
+      and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).matches | length) >= 1
+    '
+    fi
+  else
+    echo "Vector tools not available in this build; skipping vector/embedding/reranking HTTP checks"
+  fi
 
   echo "Checking destructive guard over HTTP"
   expect_failure_with_text "confirm_destructive=true" \

@@ -830,12 +830,8 @@ impl SqliteMcpServer {
             }
         };
         let response = Self::stamp_response_request_id(response, request_id);
-        let partial = !response.data.embedding.issues.is_empty()
-            || response
-                .data
-                .reranker
-                .as_ref()
-                .is_some_and(|status| !status.issues.is_empty());
+        let partial =
+            !response.data.embedding.issues.is_empty() || !response.data.reranker.issues.is_empty();
         Self::log_tool_ok("vector_status", &resolved_db_id, &response._meta, partial);
         Ok(Json(response))
     }
