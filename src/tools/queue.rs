@@ -1,11 +1,11 @@
 use std::time::Instant;
 
 use rusqlite::OptionalExtension;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::DEFAULT_DB_ID;
-use crate::contracts::common::ToolEnvelope;
+use crate::contracts::common::{ToolEnvelope, ToolHint};
 use crate::contracts::queue::{
     QueueJobData, QueuePushData, QueuePushRequest, QueueWaitData, QueueWaitRequest,
 };
@@ -208,6 +208,16 @@ pub fn poll_visible_job(
 }
 
 pub fn queue_wait_timeout(queue: String, started: Instant) -> ToolEnvelope<QueueWaitData> {
+    let hints = vec![ToolHint {
+        tool: "queue_wait".to_string(),
+        arguments: json!({
+            "queue": queue.clone(),
+            "include_existing": true,
+        }),
+        reason: "Set include_existing=true to consume queued jobs that were already visible."
+            .to_string(),
+    }];
+
     finalize_tool(
         "No new job arrived before timeout.",
         QueueWaitData {
@@ -216,7 +226,7 @@ pub fn queue_wait_timeout(queue: String, started: Instant) -> ToolEnvelope<Queue
             job: None,
         },
         started,
-        Vec::new(),
+        hints,
         None,
         None,
     )
@@ -227,6 +237,16 @@ pub fn queue_wait_found(
     job: QueueJobData,
     started: Instant,
 ) -> ToolEnvelope<QueueWaitData> {
+    let hints = vec![ToolHint {
+        tool: "queue_wait".to_string(),
+        arguments: json!({
+            "queue": queue.clone(),
+            "after_id": job.id,
+        }),
+        reason: "Pass after_id to continue from the next job without re-reading earlier jobs."
+            .to_string(),
+    }];
+
     finalize_tool(
         "Job received.",
         QueueWaitData {
@@ -235,7 +255,7 @@ pub fn queue_wait_found(
             job: Some(job),
         },
         started,
-        Vec::new(),
+        hints,
         None,
         None,
     )

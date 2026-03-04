@@ -190,7 +190,11 @@ pub fn sql_execute(
     }
 
     bind_params(&mut statement, request.params.as_ref())?;
-    let rows_affected = statement.raw_execute()?;
+    let total_changes_before = connection.total_changes();
+    statement.raw_execute()?;
+    let rows_affected = connection
+        .total_changes()
+        .saturating_sub(total_changes_before);
     let last_insert_rowid = if statement_is_insert(&request.sql) {
         Some(connection.last_insert_rowid())
     } else {
@@ -201,7 +205,7 @@ pub fn sql_execute(
     Ok(finalize_tool(
         "Statement executed.",
         SqlExecuteData {
-            rows_affected: rows_affected as u64,
+            rows_affected,
             last_insert_rowid,
         },
         started,
@@ -298,8 +302,11 @@ pub fn sql_batch(
                 "statement {index} is read-only; sql_batch only supports write statements"
             )));
         }
+        let total_changes_before = connection.total_changes();
         let rows_affected = match statement.raw_execute() {
-            Ok(affected) => affected,
+            Ok(_) => connection
+                .total_changes()
+                .saturating_sub(total_changes_before),
             Err(error) => {
                 rollback_if_needed(connection, started_transaction)?;
                 return Err(error.into());
@@ -315,7 +322,7 @@ pub fn sql_batch(
         results.push(SqlBatchResult {
             index,
             kind: BatchResultKind::Execute,
-            rows_affected: rows_affected as u64,
+            rows_affected,
             last_insert_rowid,
         });
 
@@ -596,12 +603,14 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use crate::contracts::db::DbMode;
-    use crate::contracts::sql::{BatchStatement, BatchTransactionMode, SqlBatchRequest};
+    use crate::contracts::sql::{
+        BatchStatement, BatchTransactionMode, SqlBatchRequest, SqlExecuteRequest,
+    };
     use crate::db::registry::DbRegistry;
     use crate::errors::AppError;
     use crate::policy::SqlPolicy;
 
-    use super::{sql_batch, statement_is_insert};
+    use super::{sql_batch, sql_execute, statement_is_insert};
 
     fn test_policy() -> SqlPolicy {
         SqlPolicy {
@@ -698,5 +707,23 @@ mod tests {
             }
             other => panic!("expected precondition required, got: {other}"),
         }
+    }
+
+    #[test]
+    fn sql_execute_reports_zero_rows_affected_for_ddl() {
+        let registry = setup_registry();
+        let response = sql_execute(
+            &registry,
+            &test_policy(),
+            SqlExecuteRequest {
+                db_id: None,
+                sql: "create table if not exists ddl_probe(id integer primary key)".to_string(),
+                params: None,
+            },
+        )
+        .expect("ddl statement should execute");
+
+        assert_eq!(response.data.rows_affected, 0);
+        assert_eq!(response.data.last_insert_rowid, None);
     }
 }

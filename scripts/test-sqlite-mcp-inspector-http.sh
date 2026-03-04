@@ -190,6 +190,7 @@ wait_for_server() {
 run_tests() {
   local active_db_id
   local tools_json
+  local initial_list_json
   local open_json
   local list_json
   local query_json
@@ -210,6 +211,14 @@ run_tests() {
     and ($names | index("db_import") != null)
     and ($names | index("queue_push") != null)
     and ($names | index("queue_wait") != null)
+  '
+
+  echo "Checking default database bootstrap over HTTP"
+  initial_list_json=$(run_inspector --method tools/call --tool-name db_list)
+  assert_json "$initial_list_json" '
+    (.isError != true)
+    and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).active_db_id == "default")
+    and (((.structuredContent.data // .data // .result.structuredContent.data // .result.data).open // []) | map(.db_id) | index("default") != null)
   '
 
   echo "Opening persisted DB over HTTP"

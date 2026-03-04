@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use csv::StringRecord;
@@ -5,7 +6,7 @@ use rusqlite::types::Value as SqlValue;
 use serde_json::Value;
 
 use crate::DEFAULT_DB_ID;
-use crate::contracts::common::ToolEnvelope;
+use crate::contracts::common::{ToolEnvelope, ToolHint};
 use crate::contracts::import::{
     DbImportData, DbImportRequest, ImportConflictMode, ImportFormat, ImportPayload,
 };
@@ -77,6 +78,24 @@ pub fn db_import(
         }
     }
 
+    let table_exists = import_table_exists(connection, &request.table)?;
+    if !table_exists {
+        if request.create_table_if_missing {
+            create_import_table(
+                connection,
+                &request.table,
+                &columns,
+                &rows,
+                request.infer_column_types,
+            )?;
+        } else {
+            return Err(AppError::NotFound(format!(
+                "table {} does not exist; set create_table_if_missing=true to create it",
+                request.table
+            )));
+        }
+    }
+
     connection.execute_batch("BEGIN IMMEDIATE TRANSACTION")?;
     if request.truncate_first {
         let truncate_sql = format!("DELETE FROM {}", quote_identifier(&request.table));
@@ -125,6 +144,16 @@ pub fn db_import(
 
     connection.execute_batch("COMMIT")?;
 
+    let mut hints = Vec::new();
+    hints.push(ToolHint {
+        tool: "sql_query".to_string(),
+        arguments: serde_json::json!({
+            "db_id": db_id,
+            "sql": format!("SELECT * FROM {} LIMIT 50", quote_identifier(&request.table)),
+        }),
+        reason: "Preview imported rows from the destination table.".to_string(),
+    });
+
     Ok(finalize_tool(
         "Import completed.",
         DbImportData {
@@ -134,7 +163,7 @@ pub fn db_import(
             rows_skipped: skipped,
         },
         started,
-        Vec::new(),
+        hints,
         None,
         None,
     ))
@@ -210,7 +239,11 @@ fn parse_json_rows(request: &DbImportRequest) -> AppResult<ParsedImport> {
     }
 
     let columns = if request.columns.is_empty() {
-        json_rows[0].keys().cloned().collect::<Vec<_>>()
+        let mut discovered = BTreeSet::new();
+        for row in &json_rows {
+            discovered.extend(row.keys().cloned());
+        }
+        discovered.into_iter().collect::<Vec<_>>()
     } else {
         request.columns.clone()
     };
@@ -301,4 +334,207 @@ fn json_to_sql_value(value: &Value) -> AppResult<SqlValue> {
 
 fn rows_batch_default(max_rows: usize) -> usize {
     max_rows.clamp(1, 1000)
+}
+
+fn import_table_exists(connection: &rusqlite::Connection, table: &str) -> AppResult<bool> {
+    connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?1 LIMIT 1",
+            rusqlite::params![table],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|_| true)
+        .or_else(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Ok(false),
+            other => Err(other.into()),
+        })
+}
+
+fn create_import_table(
+    connection: &rusqlite::Connection,
+    table: &str,
+    columns: &[String],
+    rows: &[Vec<Value>],
+    infer_column_types: bool,
+) -> AppResult<()> {
+    let mut column_defs = Vec::with_capacity(columns.len());
+    for (index, column) in columns.iter().enumerate() {
+        let ty = if infer_column_types {
+            infer_column_type(rows, index)
+        } else {
+            "TEXT"
+        };
+        column_defs.push(format!("{} {}", quote_identifier(column), ty));
+    }
+    let create_sql = format!(
+        "CREATE TABLE {} ({})",
+        quote_identifier(table),
+        column_defs.join(", ")
+    );
+    connection.execute(&create_sql, [])?;
+    Ok(())
+}
+
+fn infer_column_type(rows: &[Vec<Value>], index: usize) -> &'static str {
+    let mut saw_real = false;
+    let mut saw_integer = false;
+    let mut saw_bool = false;
+    let mut saw_textual = false;
+
+    for row in rows {
+        let Some(value) = row.get(index) else {
+            continue;
+        };
+        match value {
+            Value::Null => {}
+            Value::Bool(_) => saw_bool = true,
+            Value::Number(number) => {
+                if number.as_i64().is_some() {
+                    saw_integer = true;
+                } else {
+                    saw_real = true;
+                }
+            }
+            Value::String(_) | Value::Array(_) | Value::Object(_) => saw_textual = true,
+        }
+    }
+
+    if saw_textual {
+        "TEXT"
+    } else if saw_real {
+        "REAL"
+    } else if saw_integer || saw_bool {
+        "INTEGER"
+    } else {
+        "TEXT"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Map, Value, json};
+
+    use crate::contracts::db::DbMode;
+    use crate::contracts::import::{DbImportRequest, ImportFormat, ImportPayload};
+    use crate::db::registry::DbRegistry;
+    use crate::errors::AppError;
+    use crate::policy::SqlPolicy;
+
+    use super::db_import;
+
+    fn test_policy() -> SqlPolicy {
+        SqlPolicy {
+            max_sql_length: 20_000,
+            max_statements: 50,
+            max_rows: 500,
+            max_bytes: 1_048_576,
+            max_db_bytes: u64::MAX,
+        }
+    }
+
+    fn setup_registry() -> DbRegistry {
+        let mut registry = DbRegistry::default();
+        registry
+            .open_db(
+                "default".to_string(),
+                DbMode::Memory,
+                None,
+                false,
+                None,
+                u64::MAX,
+            )
+            .expect("memory db should open");
+        registry
+    }
+
+    fn json_rows(rows: &[Value]) -> ImportPayload {
+        let mut mapped = Vec::new();
+        for row in rows {
+            let object = row
+                .as_object()
+                .cloned()
+                .expect("test rows must be JSON objects");
+            let map: Map<String, Value> = object.into_iter().collect();
+            mapped.push(map);
+        }
+        ImportPayload::JsonRows(mapped)
+    }
+
+    #[test]
+    fn import_auto_creates_table_with_union_of_json_keys() {
+        let registry = setup_registry();
+        let response = db_import(
+            &registry,
+            &test_policy(),
+            DbImportRequest {
+                db_id: None,
+                format: ImportFormat::Json,
+                table: "imported_items".to_string(),
+                columns: Vec::new(),
+                data: json_rows(&[json!({"id": 1}), json!({"name": "alpha"})]),
+                batch_size: None,
+                on_conflict: None,
+                truncate_first: false,
+                create_table_if_missing: true,
+                infer_column_types: true,
+            },
+        )
+        .expect("import should succeed");
+
+        assert_eq!(
+            response.data.columns,
+            vec!["id".to_string(), "name".to_string()]
+        );
+        assert_eq!(response.data.rows_inserted, 2);
+
+        let connection = registry
+            .get_connection(Some("default"))
+            .expect("default db should exist");
+        let mut stmt = connection
+            .prepare("SELECT id, name FROM imported_items ORDER BY rowid ASC")
+            .expect("query should prepare");
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })
+            .expect("query should execute")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows should decode");
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], (Some(1), None));
+        assert_eq!(rows[1], (None, Some("alpha".to_string())));
+    }
+
+    #[test]
+    fn import_missing_table_requires_opt_in_when_auto_create_disabled() {
+        let registry = setup_registry();
+        let error = db_import(
+            &registry,
+            &test_policy(),
+            DbImportRequest {
+                db_id: None,
+                format: ImportFormat::Json,
+                table: "missing_table".to_string(),
+                columns: Vec::new(),
+                data: json_rows(&[json!({"value": 1})]),
+                batch_size: None,
+                on_conflict: None,
+                truncate_first: false,
+                create_table_if_missing: false,
+                infer_column_types: true,
+            },
+        )
+        .expect_err("missing table must fail when auto create is disabled");
+
+        match error {
+            AppError::NotFound(message) => {
+                assert!(message.contains("create_table_if_missing=true"));
+            }
+            other => panic!("expected not found error, got: {other}"),
+        }
+    }
 }

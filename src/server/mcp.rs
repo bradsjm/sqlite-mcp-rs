@@ -82,6 +82,40 @@ impl SqliteMcpServer {
                 config.max_db_bytes,
             ) {
                 tracing::warn!(path, error = %error, "failed to bootstrap persisted default db");
+                let fallback_request = DbOpenRequest {
+                    db_id: Some(crate::DEFAULT_DB_ID.to_string()),
+                    mode: DbMode::Memory,
+                    path: None,
+                    reset: false,
+                };
+                if let Err(fallback_error) = tools::db::db_open(
+                    &mut registry,
+                    &mut cursors,
+                    fallback_request,
+                    persist_root.as_deref(),
+                    config.max_db_bytes,
+                ) {
+                    tracing::error!(
+                        error = %fallback_error,
+                        "failed to bootstrap in-memory default db"
+                    );
+                }
+            }
+        } else {
+            let request = DbOpenRequest {
+                db_id: Some(crate::DEFAULT_DB_ID.to_string()),
+                mode: DbMode::Memory,
+                path: None,
+                reset: false,
+            };
+            if let Err(error) = tools::db::db_open(
+                &mut registry,
+                &mut cursors,
+                request,
+                persist_root.as_deref(),
+                config.max_db_bytes,
+            ) {
+                tracing::error!(error = %error, "failed to bootstrap in-memory default db");
             }
         }
 
@@ -438,7 +472,10 @@ impl SqliteMcpServer {
         Ok(Json(response))
     }
 
-    #[tool(name = "sql_batch", description = "Execute multiple SQL statements")]
+    #[tool(
+        name = "sql_batch",
+        description = "Execute multiple write-only SQL statements (no SELECT)"
+    )]
     async fn sql_batch(
         &self,
         Parameters(request): Parameters<SqlBatchRequest>,
@@ -475,7 +512,7 @@ impl SqliteMcpServer {
 
     #[tool(
         name = "db_import",
-        description = "Import CSV or JSON rows into a table"
+        description = "Import CSV or JSON rows into a table; creates the table by default when missing"
     )]
     async fn db_import(
         &self,
@@ -546,7 +583,10 @@ impl SqliteMcpServer {
         Ok(Json(response))
     }
 
-    #[tool(name = "queue_wait", description = "Wait for a new visible JSON job")]
+    #[tool(
+        name = "queue_wait",
+        description = "Wait for a visible JSON job; set include_existing=true to consume queued jobs"
+    )]
     async fn queue_wait(
         &self,
         Parameters(request): Parameters<QueueWaitRequest>,

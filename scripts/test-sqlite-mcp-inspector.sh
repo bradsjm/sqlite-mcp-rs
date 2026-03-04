@@ -160,6 +160,7 @@ expect_failure_with_text() {
 run_tests() {
   local active_db_id
   local tools_json
+  local initial_list_json
   local open_json
   local list_json
   local query_json
@@ -178,6 +179,14 @@ run_tests() {
     and ($names | index("sql_execute") != null)
     and ($names | index("sql_batch") != null)
     and ($names | index("db_import") != null)
+  '
+
+  echo "Checking default database bootstrap through MCP inspector"
+  initial_list_json=$(run_inspector --method tools/call --tool-name db_list)
+  assert_json "$initial_list_json" '
+    (.isError != true)
+    and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).active_db_id == "default")
+    and (((.structuredContent.data // .data // .result.structuredContent.data // .result.data).open // []) | map(.db_id) | index("default") != null)
   '
 
   echo "Opening persisted DB through MCP inspector"

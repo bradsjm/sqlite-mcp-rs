@@ -41,6 +41,10 @@ pub struct DbImportRequest {
     pub on_conflict: Option<ImportConflictMode>,
     #[serde(default)]
     pub truncate_first: bool,
+    #[serde(default = "default_true")]
+    pub create_table_if_missing: bool,
+    #[serde(default = "default_true")]
+    pub infer_column_types: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -51,4 +55,8 @@ pub struct DbImportData {
     pub rows_inserted: usize,
     #[schemars(schema_with = "crate::contracts::schema::usize_schema")]
     pub rows_skipped: usize,
+}
+
+const fn default_true() -> bool {
+    true
 }
