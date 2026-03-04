@@ -330,7 +330,7 @@ run_tests() {
   assert_json "$wait_default_false_json" '
     (.isError != true)
     and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).timed_out == true)
-    and (((.structuredContent.data // .data // .result.structuredContent.data // .result.data).job // null) == null)
+    and (((.structuredContent.data // .data // .result.structuredContent.data // .result.data).job.id // null) == null)
   '
 
   echo "Checking concurrent queue_wait + queue_push over HTTP"

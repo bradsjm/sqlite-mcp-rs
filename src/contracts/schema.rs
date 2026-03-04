@@ -77,3 +77,17 @@ pub fn any_object_schema(_: &mut SchemaGenerator) -> Schema {
         "additionalProperties": true
     })
 }
+
+pub fn any_object_or_null_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "anyOf": [
+            {
+                "type": "object",
+                "additionalProperties": true
+            },
+            {
+                "type": "null"
+            }
+        ]
+    })
+}

@@ -26,16 +26,21 @@ pub struct ToolHint {
 pub struct ToolMeta {
     /// Current UTC timestamp in RFC 3339 format.
     pub now_utc: String,
-    /// Request processing time in milliseconds.
-    #[schemars(schema_with = "crate::contracts::schema::u64_schema")]
+    /// Request processing time in milliseconds (operational logging only).
+    #[serde(skip_serializing, skip_deserializing)]
+    #[schemars(skip)]
     pub elapsed_ms: u64,
-    /// Unique identifier for this request (for tracing).
+    /// Unique identifier for this request (operational logging only).
+    #[serde(skip_serializing, skip_deserializing)]
+    #[schemars(skip)]
     pub request_id: String,
-    /// Whether results were truncated due to limits.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Whether results were truncated due to limits (operational logging only).
+    #[serde(skip_serializing, skip_deserializing)]
+    #[schemars(skip)]
     pub truncated: Option<bool>,
-    /// Cursor for fetching the next page of results.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Cursor for fetching the next page (operational logging only).
+    #[serde(skip_serializing, skip_deserializing)]
+    #[schemars(skip)]
     pub next_cursor: Option<String>,
 }
 

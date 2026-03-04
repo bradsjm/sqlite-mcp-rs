@@ -7,7 +7,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::DEFAULT_DB_ID;
 use crate::contracts::common::{ToolEnvelope, ToolHint};
 use crate::contracts::queue::{
-    QueueJobData, QueuePushData, QueuePushRequest, QueueWaitData, QueueWaitRequest,
+    QueueJobData, QueueJobSlot, QueuePushData, QueuePushRequest, QueueWaitData, QueueWaitRequest,
 };
 use crate::db::registry::DbRegistry;
 use crate::errors::{AppError, AppResult};
@@ -223,7 +223,13 @@ pub fn queue_wait_timeout(queue: String, started: Instant) -> ToolEnvelope<Queue
         QueueWaitData {
             queue,
             timed_out: true,
-            job: None,
+            job: QueueJobSlot {
+                id: None,
+                payload: None,
+                metadata: None,
+                created_at: None,
+                visible_at: None,
+            },
         },
         started,
         hints,
@@ -252,7 +258,13 @@ pub fn queue_wait_found(
         QueueWaitData {
             queue,
             timed_out: false,
-            job: Some(job),
+            job: QueueJobSlot {
+                id: Some(job.id),
+                payload: Some(job.payload),
+                metadata: job.metadata,
+                created_at: Some(job.created_at),
+                visible_at: Some(job.visible_at),
+            },
         },
         started,
         hints,

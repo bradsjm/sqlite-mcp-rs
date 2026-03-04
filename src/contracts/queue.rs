@@ -52,5 +52,19 @@ pub struct QueueJobData {
 pub struct QueueWaitData {
     pub queue: String,
     pub timed_out: bool,
-    pub job: Option<QueueJobData>,
+    pub job: QueueJobSlot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct QueueJobSlot {
+    #[serde(default)]
+    pub id: Option<i64>,
+    #[serde(default)]
+    pub payload: Option<Value>,
+    #[serde(default)]
+    pub metadata: Option<Map<String, Value>>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub visible_at: Option<String>,
 }
