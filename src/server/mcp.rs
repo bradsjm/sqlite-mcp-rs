@@ -27,8 +27,8 @@ use crate::contracts::sql::{
 #[cfg(feature = "vector")]
 use crate::contracts::vector::{
     VectorCollectionCreateData, VectorCollectionCreateRequest, VectorCollectionListData,
-    VectorCollectionListRequest, VectorSearchData, VectorSearchRequest, VectorUpsertData,
-    VectorUpsertRequest,
+    VectorCollectionListRequest, VectorSearchData, VectorSearchRequest, VectorStatusData,
+    VectorStatusRequest, VectorUpsertData, VectorUpsertRequest,
 };
 use crate::db::registry::DbRegistry;
 use crate::errors::{AppError, AppResult, ErrorCode};
@@ -783,7 +783,67 @@ impl SqliteMcpServer {
         Ok(Json(response))
     }
 
-    #[tool(name = "vector_upsert", description = "Upsert vector documents")]
+    #[tool(
+        name = "vector_status",
+        description = "Check vector runtime readiness and optionally prewarm models"
+    )]
+    #[cfg(not(feature = "vector"))]
+    async fn vector_status(
+        &self,
+        Parameters(_request): Parameters<VectorDisabledRequest>,
+    ) -> Result<Json<ToolEnvelope<VectorDisabledData>>, McpError> {
+        Err(Self::vector_disabled_error())
+    }
+
+    #[tool(
+        name = "vector_status",
+        description = "Check vector runtime readiness and optionally prewarm models"
+    )]
+    #[cfg(feature = "vector")]
+    async fn vector_status(
+        &self,
+        Parameters(request): Parameters<VectorStatusRequest>,
+    ) -> Result<Json<ToolEnvelope<VectorStatusData>>, McpError> {
+        let started_at = Instant::now();
+        let request_id = Uuid::new_v4().to_string();
+        let resolved_db_id = request
+            .db_id
+            .clone()
+            .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
+        let vector_runtime = Arc::clone(&self.vector_runtime);
+        let response = match self
+            .run_blocking(move |_registry, _cursors| {
+                tools::vector::vector_status(&vector_runtime, request)
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                Self::log_tool_error(
+                    "vector_status",
+                    &resolved_db_id,
+                    &request_id,
+                    started_at,
+                    &error,
+                );
+                return Err(Self::map_error(error, Some(&request_id)));
+            }
+        };
+        let response = Self::stamp_response_request_id(response, request_id);
+        let partial = !response.data.embedding.issues.is_empty()
+            || response
+                .data
+                .reranker
+                .as_ref()
+                .is_some_and(|status| !status.issues.is_empty());
+        Self::log_tool_ok("vector_status", &resolved_db_id, &response._meta, partial);
+        Ok(Json(response))
+    }
+
+    #[tool(
+        name = "vector_upsert",
+        description = "Upsert vector documents; call vector_status to diagnose model/runtime issues"
+    )]
     #[cfg(not(feature = "vector"))]
     async fn vector_upsert(
         &self,
@@ -792,7 +852,10 @@ impl SqliteMcpServer {
         Err(Self::vector_disabled_error())
     }
 
-    #[tool(name = "vector_upsert", description = "Upsert vector documents")]
+    #[tool(
+        name = "vector_upsert",
+        description = "Upsert vector documents; call vector_status to diagnose model/runtime issues"
+    )]
     #[cfg(feature = "vector")]
     async fn vector_upsert(
         &self,
@@ -829,7 +892,10 @@ impl SqliteMcpServer {
         Ok(Json(response))
     }
 
-    #[tool(name = "vector_search", description = "Search vector collections")]
+    #[tool(
+        name = "vector_search",
+        description = "Search vector collections; call vector_status to diagnose model/runtime issues"
+    )]
     #[cfg(not(feature = "vector"))]
     async fn vector_search(
         &self,
@@ -838,7 +904,10 @@ impl SqliteMcpServer {
         Err(Self::vector_disabled_error())
     }
 
-    #[tool(name = "vector_search", description = "Search vector collections")]
+    #[tool(
+        name = "vector_search",
+        description = "Search vector collections; call vector_status to diagnose model/runtime issues"
+    )]
     #[cfg(feature = "vector")]
     async fn vector_search(
         &self,

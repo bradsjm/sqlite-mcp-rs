@@ -43,6 +43,10 @@ pub fn ensure_ort_dylib_configured() -> AppResult<()> {
     Ok(())
 }
 
+pub fn current_ort_dylib_path() -> Option<PathBuf> {
+    std::env::var_os(ORT_DYLIB_PATH_ENV).map(PathBuf::from)
+}
+
 pub fn resolve_ort_dylib_path(cache_dir: Option<PathBuf>) -> AppResult<PathBuf> {
     if let Some(existing) = std::env::var_os(ORT_DYLIB_PATH_ENV) {
         let existing_path = PathBuf::from(existing);

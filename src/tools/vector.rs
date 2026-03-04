@@ -8,14 +8,15 @@ use serde_json::Value;
 
 use crate::DEFAULT_DB_ID;
 use crate::adapters::embeddings::{EmbeddingClient, serialize_embedding_json};
+use crate::adapters::ort_runtime::current_ort_dylib_path;
 use crate::adapters::reranker::RerankerClient;
 use crate::config::{EmbeddingConfig, RerankerConfig};
-use crate::contracts::common::ToolEnvelope;
+use crate::contracts::common::{ToolEnvelope, ToolHint};
 use crate::contracts::vector::{
-    RerankMode, VectorCollectionCreateData, VectorCollectionCreateRequest,
+    RerankMode, VectorBackendStatus, VectorCollectionCreateData, VectorCollectionCreateRequest,
     VectorCollectionListData, VectorCollectionListRequest, VectorCollectionSummary,
     VectorConflictMode, VectorIssue, VectorMatch, VectorSearchData, VectorSearchRequest,
-    VectorUpsertData, VectorUpsertRequest,
+    VectorStatusData, VectorStatusRequest, VectorUpsertData, VectorUpsertRequest,
 };
 use crate::db::persistence::enforce_db_size_limit;
 use crate::db::registry::DbRegistry;
@@ -64,6 +65,104 @@ impl VectorRuntime {
             },
         }
     }
+
+    fn prewarm_embedding(&self) -> AppResult<()> {
+        self.embedding.prewarm()
+    }
+
+    fn prewarm_reranker(&self) -> AppResult<()> {
+        match &self.reranker {
+            Some(client) => client.prewarm(),
+            None => Ok(()),
+        }
+    }
+}
+
+pub fn vector_status(
+    runtime: &VectorRuntime,
+    request: VectorStatusRequest,
+) -> AppResult<ToolEnvelope<VectorStatusData>> {
+    let started = Instant::now();
+    let db_id = request.db_id.unwrap_or_else(|| DEFAULT_DB_ID.to_string());
+    let prewarm_attempted = request.prewarm;
+
+    let mut embedding_issues = Vec::new();
+    let mut reranker_issues = Vec::new();
+    let mut ort_issues = Vec::new();
+    let mut ort_ready = current_ort_dylib_path().is_some_and(|path| path.exists());
+
+    if request.prewarm {
+        if let Err(error) = runtime.prewarm_embedding() {
+            embedding_issues.push(vector_issue_from_error("embedding_init", &error));
+            ort_issues.push(vector_issue_from_error("ort_runtime", &error));
+        }
+
+        if let Err(error) = runtime.prewarm_reranker() {
+            reranker_issues.push(vector_issue_from_error("reranker_init", &error));
+            ort_issues.push(vector_issue_from_error("ort_runtime", &error));
+        }
+    }
+
+    let ort_path = current_ort_dylib_path();
+    ort_ready = ort_ready || ort_path.as_ref().is_some_and(|path| path.exists());
+
+    let embedding = VectorBackendStatus {
+        provider: embedding_provider_name(runtime).to_string(),
+        model: runtime.embedding.model().to_string(),
+        dimension: Some(runtime.embedding.dimension()),
+        cache_dir: runtime
+            .embedding
+            .cache_dir_path()
+            .map(|path| path.display().to_string()),
+        ready: embedding_issues.is_empty(),
+        issues: embedding_issues,
+    };
+
+    let reranker = runtime.reranker.as_ref().map(|client| VectorBackendStatus {
+        provider: reranker_provider_name(client).to_string(),
+        model: client.model().to_string(),
+        dimension: None,
+        cache_dir: client
+            .cache_dir_path()
+            .map(|path| path.display().to_string()),
+        ready: reranker_issues.is_empty(),
+        issues: reranker_issues,
+    });
+
+    let mut hints = Vec::new();
+    if !ort_issues.is_empty() {
+        hints.push(ToolHint {
+            tool: "vector_status".to_string(),
+            arguments: serde_json::json!({
+                "db_id": db_id.clone(),
+                "prewarm": true,
+            }),
+            reason: "Re-run prewarm checks after fixing network/cache/runtime availability."
+                .to_string(),
+        });
+    }
+
+    let summary = if embedding.ready && reranker.as_ref().is_none_or(|status| status.ready) {
+        "Vector runtime is ready."
+    } else {
+        "Vector runtime is not fully ready."
+    };
+
+    Ok(finalize_tool(
+        summary,
+        VectorStatusData {
+            db_id,
+            ort_ready,
+            ort_dylib_path: ort_path.map(|path| path.display().to_string()),
+            prewarm_attempted,
+            embedding,
+            reranker,
+        },
+        started,
+        hints,
+        None,
+        None,
+    ))
 }
 
 pub fn vector_collection_create(
@@ -82,6 +181,10 @@ pub fn vector_collection_create(
             "collection must match ^[A-Za-z_][A-Za-z0-9_]*$".to_string(),
         ));
     }
+
+    runtime
+        .prewarm_embedding()
+        .map_err(|error| vector_dependency_error("embedding_init", runtime, error))?;
 
     let dimension = runtime.embedding.dimension();
     if dimension == 0 {
@@ -247,6 +350,10 @@ pub fn vector_upsert(
         ));
     }
 
+    runtime
+        .prewarm_embedding()
+        .map_err(|error| vector_dependency_error("embedding_init", runtime, error))?;
+
     let collection = load_collection(connection, &request.collection)?;
     let conflict_mode = request.on_conflict.unwrap_or(VectorConflictMode::Replace);
     let mut upserted_count = 0usize;
@@ -256,7 +363,10 @@ pub fn vector_upsert(
 
     let upsert_result = (|| -> AppResult<()> {
         for item in request.items {
-            let embedding = runtime.embedding.embed(&item.text)?;
+            let embedding = runtime
+                .embedding
+                .embed(&item.text)
+                .map_err(|error| vector_dependency_error("embedding_upsert", runtime, error))?;
             if embedding.len() != collection.dimension {
                 return Err(AppError::Dependency(format!(
                     "embedding dimension mismatch: expected {}, got {}",
@@ -374,7 +484,13 @@ pub fn vector_search(
     let connection = registry.get_connection(Some(&db_id))?;
 
     let collection = load_collection(connection, &request.collection)?;
-    let query_embedding = runtime.embedding.embed(&request.query_text)?;
+    runtime
+        .prewarm_embedding()
+        .map_err(|error| vector_dependency_error("embedding_init", runtime, error))?;
+    let query_embedding = runtime
+        .embedding
+        .embed(&request.query_text)
+        .map_err(|error| vector_dependency_error("embedding_query", runtime, error))?;
     if query_embedding.len() != collection.dimension {
         return Err(AppError::Dependency(format!(
             "query embedding dimension mismatch: expected {}, got {}",
@@ -517,7 +633,7 @@ pub fn vector_search(
                     issues.push(VectorIssue {
                         stage: "rerank".to_string(),
                         code: "RERANK_FAILED".to_string(),
-                        message: error.to_string(),
+                        message: vector_dependency_message("reranker", &error.to_string()),
                         retryable: true,
                     });
                     selected.sort_by(|left, right| {
@@ -658,6 +774,57 @@ fn metadata_matches(
         .all(|(key, value)| metadata.get(key) == Some(value))
 }
 
+fn vector_dependency_error(stage: &str, runtime: &VectorRuntime, error: AppError) -> AppError {
+    let ort_path = current_ort_dylib_path().map(|path| path.display().to_string());
+    let message = vector_dependency_message(stage, &error.to_string());
+    AppError::Dependency(format!(
+        "{message}; embedding_model={}; embedding_cache_dir={}; ort_dylib_path={}; run vector_status with {{\"prewarm\":true}} for diagnostics",
+        runtime.embedding.model(),
+        runtime
+            .embedding
+            .cache_dir_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<default>".to_string()),
+        ort_path.unwrap_or_else(|| "<unset>".to_string()),
+    ))
+}
+
+fn vector_dependency_message(stage: &str, raw: &str) -> String {
+    if raw.contains("Failed to retrieve onnx/model.onnx") {
+        return format!(
+            "{stage} failed because model artifacts were not retrievable (Failed to retrieve onnx/model.onnx)"
+        );
+    }
+    if raw.contains("ORT runtime not initialized") {
+        return format!("{stage} failed because ORT runtime is not initialized");
+    }
+    if raw.contains("failed downloading ONNX Runtime") {
+        return format!("{stage} failed while downloading ONNX Runtime");
+    }
+    format!("{stage} failed: {raw}")
+}
+
+fn vector_issue_from_error(stage: &str, error: &AppError) -> VectorIssue {
+    VectorIssue {
+        stage: stage.to_string(),
+        code: "DEPENDENCY_ERROR".to_string(),
+        message: vector_dependency_message(stage, &error.to_string()),
+        retryable: true,
+    }
+}
+
+fn embedding_provider_name(runtime: &VectorRuntime) -> &'static str {
+    match runtime.embedding.provider() {
+        crate::config::EmbeddingProvider::Fastembed => "fastembed",
+    }
+}
+
+fn reranker_provider_name(client: &RerankerClient) -> &'static str {
+    match client.provider() {
+        crate::config::RerankerProvider::Fastembed => "fastembed",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -668,12 +835,14 @@ mod tests {
     use crate::contracts::db::DbMode;
     use crate::contracts::vector::{
         RerankMode, VectorCollectionCreateRequest, VectorDocument, VectorSearchRequest,
-        VectorUpsertRequest,
+        VectorStatusRequest, VectorUpsertRequest,
     };
     use crate::db::registry::DbRegistry;
     use crate::errors::AppError;
 
-    use super::{VectorRuntime, vector_collection_create, vector_search, vector_upsert};
+    use super::{
+        VectorRuntime, vector_collection_create, vector_search, vector_status, vector_upsert,
+    };
 
     fn embedding_config(dimension: usize) -> EmbeddingConfig {
         EmbeddingConfig {
@@ -1134,5 +1303,59 @@ mod tests {
             }
             other => panic!("expected invalid input, got: {other}"),
         }
+    }
+
+    #[test]
+    fn vector_status_reports_ready_with_test_embeddings() {
+        let runtime = VectorRuntime::with_test_embeddings(
+            embedding_config(3),
+            None,
+            HashMap::from([("query-alpha".to_string(), vec![1.0, 0.0, 0.0])]),
+        );
+
+        let status = vector_status(
+            &runtime,
+            VectorStatusRequest {
+                db_id: None,
+                prewarm: true,
+            },
+        )
+        .expect("status call should succeed");
+
+        assert_eq!(status.data.db_id, "default");
+        assert!(status.data.prewarm_attempted);
+        assert!(status.data.embedding.ready);
+        assert!(status.data.embedding.issues.is_empty());
+        assert!(status.data.reranker.is_none());
+    }
+
+    #[test]
+    fn vector_status_reports_reranker_ready_with_test_clients() {
+        let runtime = VectorRuntime::with_test_clients(
+            embedding_config(3),
+            Some(reranker_config()),
+            HashMap::from([("query-alpha".to_string(), vec![1.0, 0.0, 0.0])]),
+            Some(HashMap::from([("query-alpha".to_string(), vec![0.2, 0.1])])),
+        );
+
+        let status = vector_status(
+            &runtime,
+            VectorStatusRequest {
+                db_id: Some("test_db".to_string()),
+                prewarm: true,
+            },
+        )
+        .expect("status call should succeed");
+
+        assert_eq!(status.data.db_id, "test_db");
+        assert!(status.data.embedding.ready);
+        assert!(status.data.embedding.issues.is_empty());
+        let reranker = status
+            .data
+            .reranker
+            .as_ref()
+            .expect("reranker status should be present");
+        assert!(reranker.ready);
+        assert!(reranker.issues.is_empty());
     }
 }

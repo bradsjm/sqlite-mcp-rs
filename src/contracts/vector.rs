@@ -39,6 +39,39 @@ pub struct VectorCollectionListData {
     pub collections: Vec<VectorCollectionSummary>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VectorStatusRequest {
+    #[serde(default)]
+    pub db_id: Option<String>,
+    #[serde(default = "default_true")]
+    pub prewarm: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VectorBackendStatus {
+    pub provider: String,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dimension: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<String>,
+    pub ready: bool,
+    #[serde(default)]
+    pub issues: Vec<VectorIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VectorStatusData {
+    pub db_id: String,
+    pub ort_ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ort_dylib_path: Option<String>,
+    pub prewarm_attempted: bool,
+    pub embedding: VectorBackendStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reranker: Option<VectorBackendStatus>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VectorConflictMode {
@@ -127,4 +160,8 @@ pub struct VectorSearchData {
     pub rerank_model: Option<String>,
     #[serde(default)]
     pub issues: Vec<VectorIssue>,
+}
+
+const fn default_true() -> bool {
+    true
 }

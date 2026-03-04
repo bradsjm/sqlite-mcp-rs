@@ -47,6 +47,30 @@ impl RerankerClient {
         self.config.model.as_str()
     }
 
+    pub fn provider(&self) -> RerankerProvider {
+        self.config.provider
+    }
+
+    pub fn cache_dir_path(&self) -> Option<PathBuf> {
+        self.cache_dir()
+    }
+
+    pub fn prewarm(&self) -> AppResult<()> {
+        #[cfg(test)]
+        if self.test_scores.is_some() {
+            return Ok(());
+        }
+
+        match self.config.provider {
+            RerankerProvider::Fastembed => {
+                let mut guard = self.state.lock().map_err(|_| {
+                    AppError::Dependency("reranker model lock poisoned".to_string())
+                })?;
+                self.ensure_fastembed_loaded(&mut guard)
+            }
+        }
+    }
+
     pub fn rerank(&self, query: &str, docs: &[String]) -> AppResult<Vec<f64>> {
         if docs.is_empty() {
             return Ok(Vec::new());
@@ -87,20 +111,7 @@ impl RerankerClient {
             .lock()
             .map_err(|_| AppError::Dependency("reranker model lock poisoned".to_string()))?;
 
-        if guard.is_none() {
-            ensure_ort_dylib_configured()?;
-
-            let mut options = RerankInitOptions::new(self.model.clone());
-            if let Some(cache_dir) = self.cache_dir() {
-                options = options.with_cache_dir(cache_dir);
-            }
-            options = options.with_show_download_progress(false);
-
-            let model = TextRerank::try_new(options).map_err(|error| {
-                AppError::Dependency(format!("failed to initialize reranker model: {error}"))
-            })?;
-            *guard = Some(model);
-        }
+        self.ensure_fastembed_loaded(&mut guard)?;
 
         let model = guard
             .as_mut()
@@ -129,6 +140,26 @@ impl RerankerClient {
         }
 
         Ok(scores)
+    }
+
+    fn ensure_fastembed_loaded(&self, guard: &mut Option<TextRerank>) -> AppResult<()> {
+        if guard.is_some() {
+            return Ok(());
+        }
+
+        ensure_ort_dylib_configured()?;
+
+        let mut options = RerankInitOptions::new(self.model.clone());
+        if let Some(cache_dir) = self.cache_dir() {
+            options = options.with_cache_dir(cache_dir);
+        }
+        options = options.with_show_download_progress(false);
+
+        let model = TextRerank::try_new(options).map_err(|error| {
+            AppError::Dependency(format!("failed to initialize reranker model: {error}"))
+        })?;
+        *guard = Some(model);
+        Ok(())
     }
 
     fn cache_dir(&self) -> Option<PathBuf> {

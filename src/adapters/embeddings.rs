@@ -52,6 +52,30 @@ impl EmbeddingClient {
         self.config.dimension
     }
 
+    pub fn provider(&self) -> EmbeddingProvider {
+        self.config.provider
+    }
+
+    pub fn cache_dir_path(&self) -> Option<PathBuf> {
+        self.cache_dir()
+    }
+
+    pub fn prewarm(&self) -> AppResult<()> {
+        #[cfg(test)]
+        if self.test_embeddings.is_some() {
+            return Ok(());
+        }
+
+        match self.config.provider {
+            EmbeddingProvider::Fastembed => {
+                let mut guard = self.state.lock().map_err(|_| {
+                    AppError::Dependency("embedding model lock poisoned".to_string())
+                })?;
+                self.ensure_fastembed_loaded(&mut guard)
+            }
+        }
+    }
+
     pub fn embed(&self, text: &str) -> AppResult<Vec<f32>> {
         #[cfg(test)]
         {
@@ -89,20 +113,7 @@ impl EmbeddingClient {
             .lock()
             .map_err(|_| AppError::Dependency("embedding model lock poisoned".to_string()))?;
 
-        if guard.is_none() {
-            ensure_ort_dylib_configured()?;
-
-            let mut options = TextInitOptions::new(self.model.clone());
-            if let Some(cache_dir) = self.cache_dir() {
-                options = options.with_cache_dir(cache_dir);
-            }
-            options = options.with_show_download_progress(false);
-
-            let model = TextEmbedding::try_new(options).map_err(|error| {
-                AppError::Dependency(format!("failed to initialize embedding model: {error}"))
-            })?;
-            *guard = Some(model);
-        }
+        self.ensure_fastembed_loaded(&mut guard)?;
 
         let model = guard
             .as_mut()
@@ -125,6 +136,26 @@ impl EmbeddingClient {
 
         normalize_embedding(&mut embedding);
         Ok(embedding)
+    }
+
+    fn ensure_fastembed_loaded(&self, guard: &mut Option<TextEmbedding>) -> AppResult<()> {
+        if guard.is_some() {
+            return Ok(());
+        }
+
+        ensure_ort_dylib_configured()?;
+
+        let mut options = TextInitOptions::new(self.model.clone());
+        if let Some(cache_dir) = self.cache_dir() {
+            options = options.with_cache_dir(cache_dir);
+        }
+        options = options.with_show_download_progress(false);
+
+        let model = TextEmbedding::try_new(options).map_err(|error| {
+            AppError::Dependency(format!("failed to initialize embedding model: {error}"))
+        })?;
+        *guard = Some(model);
+        Ok(())
     }
 
     fn cache_dir(&self) -> Option<PathBuf> {
