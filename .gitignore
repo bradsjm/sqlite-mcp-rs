@@ -29,3 +29,4 @@
 
 .tmp/
 .fastembed_cache/
+.inspector-cache/
