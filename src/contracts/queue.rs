@@ -52,7 +52,5 @@ pub struct QueueJobData {
 pub struct QueueWaitData {
     pub queue: String,
     pub timed_out: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "crate::contracts::schema::any_object_schema")]
     pub job: Option<QueueJobData>,
 }
