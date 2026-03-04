@@ -80,7 +80,10 @@ async fn run_server(config: AppConfig, cli: Cli) -> Result<(), String> {
 }
 
 async fn run_stdio_server(config: AppConfig) -> Result<(), String> {
-    let server = SqliteMcpServer::new(config);
+    tracing::info!("building MCP server for stdio transport");
+    let server = SqliteMcpServer::new(config)
+        .map_err(|error| format!("failed to initialize MCP server: {error}"))?;
+    tracing::info!("MCP stdio server initialization complete");
     let service = server
         .serve(stdio())
         .await
@@ -93,7 +96,10 @@ async fn run_stdio_server(config: AppConfig) -> Result<(), String> {
 }
 
 async fn run_http_server(config: AppConfig, host: String, port: u16) -> Result<(), String> {
-    let server = SqliteMcpServer::new(config);
+    tracing::info!("building MCP server for HTTP transport");
+    let server = SqliteMcpServer::new(config)
+        .map_err(|error| format!("failed to initialize MCP server: {error}"))?;
+    tracing::info!("MCP HTTP server initialization complete");
     let service = StreamableHttpService::new(
         move || Ok(server.clone()),
         Arc::new(LocalSessionManager::default()),

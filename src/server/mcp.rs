@@ -60,7 +60,8 @@ struct VectorDisabledData {
 }
 
 impl SqliteMcpServer {
-    pub fn new(config: AppConfig) -> Self {
+    pub fn new(config: AppConfig) -> AppResult<Self> {
+        tracing::info!("initializing MCP server state");
         let persist_root = config.persist_root.clone();
         let cursor_ttl = Duration::from_secs(config.cursor_ttl_seconds);
         let cursor_capacity = config.cursor_capacity;
@@ -68,6 +69,7 @@ impl SqliteMcpServer {
         let mut cursors = CursorStore::new(cursor_ttl, cursor_capacity);
 
         if let Ok(path) = std::env::var("SQLITE_INSPECTOR_DB_PATH") {
+            tracing::info!(path, "bootstrapping persisted default database");
             let request = DbOpenRequest {
                 db_id: Some(crate::DEFAULT_DB_ID.to_string()),
                 mode: DbMode::Persist,
@@ -100,8 +102,12 @@ impl SqliteMcpServer {
                         "failed to bootstrap in-memory default db"
                     );
                 }
+                tracing::info!("bootstrapped in-memory default database after persisted fallback");
+            } else {
+                tracing::info!("bootstrapped persisted default database");
             }
         } else {
+            tracing::info!("bootstrapping in-memory default database");
             let request = DbOpenRequest {
                 db_id: Some(crate::DEFAULT_DB_ID.to_string()),
                 mode: DbMode::Memory,
@@ -116,6 +122,8 @@ impl SqliteMcpServer {
                 config.max_db_bytes,
             ) {
                 tracing::error!(error = %error, "failed to bootstrap in-memory default db");
+            } else {
+                tracing::info!("bootstrapped in-memory default database");
             }
         }
 
@@ -124,7 +132,10 @@ impl SqliteMcpServer {
             config.embedding.clone(),
             config.reranker.clone(),
         ));
-        Self {
+        tracing::info!("prewarming vector dependencies at startup");
+        vector_runtime.prewarm_startup()?;
+
+        let server = Self {
             registry: Arc::new(Mutex::new(registry)),
             cursors: Arc::new(Mutex::new(cursors)),
             config: Arc::new(config),
@@ -132,7 +143,9 @@ impl SqliteMcpServer {
             #[cfg(feature = "vector")]
             vector_runtime,
             tool_router: Self::tool_router(),
-        }
+        };
+        tracing::info!("MCP server state initialized");
+        Ok(server)
     }
 
     fn sql_policy(&self) -> SqlPolicy {

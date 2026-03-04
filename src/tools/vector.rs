@@ -76,6 +76,39 @@ impl VectorRuntime {
             None => Ok(()),
         }
     }
+
+    pub fn prewarm_startup(&self) -> AppResult<()> {
+        tracing::info!(
+            embedding_provider = %embedding_provider_name(self),
+            embedding_model = %self.embedding.model(),
+            embedding_cache_dir = %self
+                .embedding
+                .cache_dir_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<default>".to_string()),
+            "prewarming embedding runtime"
+        );
+        self.prewarm_embedding()?;
+        tracing::info!("embedding runtime prewarm complete");
+
+        if let Some(reranker) = &self.reranker {
+            tracing::info!(
+                reranker_provider = %reranker_provider_name(reranker),
+                reranker_model = %reranker.model(),
+                reranker_cache_dir = %reranker
+                    .cache_dir_path()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<default>".to_string()),
+                "prewarming reranker runtime"
+            );
+            self.prewarm_reranker()?;
+            tracing::info!("reranker runtime prewarm complete");
+        } else {
+            tracing::info!("reranker prewarm skipped (not configured)");
+        }
+
+        Ok(())
+    }
 }
 
 pub fn vector_status(
