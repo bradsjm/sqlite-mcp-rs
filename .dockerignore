@@ -1,3 +1,5 @@
 target
 .git
 .github
+.fastembed_cache/
+.inspector-cache/
