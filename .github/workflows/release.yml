@@ -76,7 +76,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             rust_target: aarch64-apple-darwin
             binary_name: sqlite-mcp-rs
             can_smoke: "true"
@@ -91,7 +91,7 @@ jobs:
             binary_name: sqlite-mcp-rs.exe
             can_smoke: "true"
             use_zigbuild: "false"
-          - runner: windows-2022
+          - runner: windows-2022-arm64
             rust_target: aarch64-pc-windows-msvc
             binary_name: sqlite-mcp-rs.exe
             can_smoke: "false"
@@ -416,7 +416,7 @@ jobs:
             manifest.meta_package.path,
           ];
           for (const tarball of tarballs) {
-            const result = spawnSync("npm", ["publish", "--access", "public", "--provenance", `./npm-dist/${tarball}`], {
+            const result = spawnSync("npm", ["publish", "--access", "public", "--provenance", "--tag", "latest", `./npm-dist/${tarball}`], {
               stdio: "inherit",
             });
             if (result.status !== 0) {
