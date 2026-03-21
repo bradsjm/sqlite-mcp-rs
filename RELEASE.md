@@ -93,6 +93,12 @@ The npm launcher always selects the musl Linux builds:
 
 This avoids glibc baseline management in the npm path. This is a packaging decision, not a general rule for all Rust binaries. If a future MCP repo cannot run correctly from musl builds, do not force this pattern. Restore explicit GNU packaging instead.
 
+Current repository nuance:
+
+- Linux musl release and npm artifacts build with `vector` only.
+- Local embedding/reranking support (`local-embeddings`) is intentionally excluded from musl artifacts.
+- Docker images use a glibc runtime and build with `vector local-embeddings`.
+
 ### 6. Keep Docker publishing separate from release artifact builds
 
 The release workflow builds all GitHub release and npm payloads directly on CI runners. The Docker publish workflow is separate and is the only workflow that builds and publishes container images.
@@ -151,7 +157,7 @@ This is the gate that prevents packaging broken code.
 Purpose:
 
 - build every release binary in one matrix job
-- use `cargo build --release --features vector --target ...` for macOS and Windows targets
+- use `cargo build --release --features "vector local-embeddings" --target ...` for macOS and Windows targets
 - use `cargo zigbuild --release --features vector --target ...` for Linux musl targets
 - run `--help` smoke tests where the runner can execute the binary
 - package each binary with `scripts/package_release.py`

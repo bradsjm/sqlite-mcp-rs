@@ -81,26 +81,31 @@ jobs:
             binary_name: sqlite-mcp-rs
             can_smoke: "true"
             use_zigbuild: "false"
+            cargo_features: "vector local-embeddings"
           - runner: macos-15-intel
             rust_target: x86_64-apple-darwin
             binary_name: sqlite-mcp-rs
             can_smoke: "true"
             use_zigbuild: "false"
+            cargo_features: "vector local-embeddings"
           - runner: windows-2022
             rust_target: x86_64-pc-windows-msvc
             binary_name: sqlite-mcp-rs.exe
             can_smoke: "true"
             use_zigbuild: "false"
+            cargo_features: "vector local-embeddings"
           - runner: ubuntu-24.04
             rust_target: x86_64-unknown-linux-musl
             binary_name: sqlite-mcp-rs
             can_smoke: "true"
             use_zigbuild: "true"
+            cargo_features: "vector"
           - runner: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-musl
             binary_name: sqlite-mcp-rs
             can_smoke: "true"
             use_zigbuild: "true"
+            cargo_features: "vector"
     runs-on: ${{ matrix.runner }}
     env:
       CFLAGS: -Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t
@@ -194,9 +199,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
-            cargo zigbuild --release --features vector --target ${{ matrix.rust_target }}
+            cargo zigbuild --release --features "${{ matrix.cargo_features }}" --target ${{ matrix.rust_target }}
           else
-            cargo build --release --features vector --target ${{ matrix.rust_target }}
+            cargo build --release --features "${{ matrix.cargo_features }}" --target ${{ matrix.rust_target }}
           fi
 
       - name: Smoke test binary
@@ -375,11 +380,11 @@ jobs:
           Supported binaries:
           - macOS: Apple Silicon and Intel
           - Windows: x64
-          - Linux: x64 and arm64 via musl builds
+          - Linux: x64 and arm64 via musl builds (vector tools enabled; local embeddings/reranking not included)
 
           Docker images:
-          - linux/amd64
-          - linux/arm64
+          - linux/amd64 (glibc runtime with local embeddings)
+          - linux/arm64 (glibc runtime with local embeddings)
           EOF
 
       - name: Create GitHub release

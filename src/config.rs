@@ -6,9 +6,9 @@
 use std::path::PathBuf;
 
 use crate::errors::AppError;
-#[cfg(feature = "vector")]
+#[cfg(feature = "local-embeddings")]
 use fastembed::RerankerModel;
-#[cfg(feature = "vector")]
+#[cfg(feature = "local-embeddings")]
 use fastembed::{EmbeddingModel, ModelTrait};
 
 /// Application configuration loaded from environment variables.
@@ -47,22 +47,29 @@ pub struct AppConfig {
     pub queue_poll_interval_ms_min: u64,
     /// Maximum poll interval for queue waits in milliseconds (SQLITE_QUEUE_POLL_INTERVAL_MS_MAX, default: 5_000).
     pub queue_poll_interval_ms_max: u64,
-    /// Maximum top-k results for vector search (SQLITE_MAX_VECTOR_TOP_K, default: 200).
     #[cfg(feature = "vector")]
-    pub max_vector_top_k: usize,
-    /// Maximum fetch-k for reranking (SQLITE_MAX_RERANK_FETCH_K, default: 500).
-    #[cfg(feature = "vector")]
-    pub max_rerank_fetch_k: usize,
+    pub vector: VectorConfig,
     /// Embedding model configuration.
-    #[cfg(feature = "vector")]
+    #[cfg(feature = "local-embeddings")]
     pub embedding: EmbeddingConfig,
     /// Optional reranker configuration.
-    #[cfg(feature = "vector")]
+    #[cfg(feature = "local-embeddings")]
     pub reranker: Option<RerankerConfig>,
 }
 
-/// Configuration for text embedding models.
 #[cfg(feature = "vector")]
+#[derive(Debug, Clone)]
+pub struct VectorConfig {
+    /// Embedding dimension size.
+    pub dimension: usize,
+    /// Maximum top-k results for vector search (SQLITE_MAX_VECTOR_TOP_K, default: 200).
+    pub max_top_k: usize,
+    /// Maximum fetch-k for reranking (SQLITE_MAX_RERANK_FETCH_K, default: 500).
+    pub max_rerank_fetch_k: usize,
+}
+
+/// Configuration for text embedding models.
+#[cfg(feature = "local-embeddings")]
 #[derive(Debug, Clone)]
 pub struct EmbeddingConfig {
     /// Provider for embedding generation.
@@ -76,7 +83,7 @@ pub struct EmbeddingConfig {
 }
 
 /// Supported embedding providers.
-#[cfg(feature = "vector")]
+#[cfg(feature = "local-embeddings")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingProvider {
     /// FastEmbed provider for local embedding generation.
@@ -84,7 +91,7 @@ pub enum EmbeddingProvider {
 }
 
 /// Configuration for reranking models.
-#[cfg(feature = "vector")]
+#[cfg(feature = "local-embeddings")]
 #[derive(Debug, Clone)]
 pub struct RerankerConfig {
     /// Provider for reranking.
@@ -96,7 +103,7 @@ pub struct RerankerConfig {
 }
 
 /// Supported reranker providers.
-#[cfg(feature = "vector")]
+#[cfg(feature = "local-embeddings")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RerankerProvider {
     /// FastEmbed provider for local reranking.
@@ -176,15 +183,15 @@ impl AppConfig {
                 5_000,
             )?,
             #[cfg(feature = "vector")]
-            max_vector_top_k: positive_usize(&lookup, "SQLITE_MAX_VECTOR_TOP_K", 200)?,
-            #[cfg(feature = "vector")]
-            max_rerank_fetch_k: positive_usize(&lookup, "SQLITE_MAX_RERANK_FETCH_K", 500)?,
-            #[cfg(feature = "vector")]
+            vector: vector_config(&lookup)?,
+            #[cfg(feature = "local-embeddings")]
             embedding: embedding_config(&lookup)?,
-            #[cfg(feature = "vector")]
+            #[cfg(feature = "local-embeddings")]
             reranker: reranker_config(&lookup)?,
         };
         config.validate_queue_wait_bounds()?;
+        #[cfg(feature = "local-embeddings")]
+        config.validate_local_embedding_bounds()?;
         Ok(config)
     }
 
@@ -214,6 +221,18 @@ impl AppConfig {
 
         Ok(())
     }
+
+    #[cfg(feature = "local-embeddings")]
+    fn validate_local_embedding_bounds(&self) -> Result<(), AppError> {
+        if self.embedding.dimension != self.vector.dimension {
+            return Err(AppError::InvalidInput(format!(
+                "SQLITE_VECTOR_DIMENSION ({}) must match the configured local embedding model dimension ({})",
+                self.vector.dimension, self.embedding.dimension
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 fn log_level<F>(lookup: &F, key: &str, default: &str) -> Result<String, AppError>
@@ -231,6 +250,18 @@ where
 }
 
 #[cfg(feature = "vector")]
+fn vector_config<F>(lookup: &F) -> Result<VectorConfig, AppError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    Ok(VectorConfig {
+        dimension: positive_usize(lookup, "SQLITE_VECTOR_DIMENSION", 384)?,
+        max_top_k: positive_usize(lookup, "SQLITE_MAX_VECTOR_TOP_K", 200)?,
+        max_rerank_fetch_k: positive_usize(lookup, "SQLITE_MAX_RERANK_FETCH_K", 500)?,
+    })
+}
+
+#[cfg(feature = "local-embeddings")]
 fn embedding_config<F>(lookup: &F) -> Result<EmbeddingConfig, AppError>
 where
     F: Fn(&str) -> Option<String>,
@@ -261,7 +292,7 @@ where
     })
 }
 
-#[cfg(feature = "vector")]
+#[cfg(feature = "local-embeddings")]
 fn parse_embedding_model(value: &str) -> Result<EmbeddingModel, AppError> {
     match value {
         "BAAI/bge-small-en-v1.5" | "bge-small-en-v1.5" | "BGESmallENV15" | "bgesmallenv15" => {
@@ -273,7 +304,7 @@ fn parse_embedding_model(value: &str) -> Result<EmbeddingModel, AppError> {
     }
 }
 
-#[cfg(feature = "vector")]
+#[cfg(feature = "local-embeddings")]
 fn reranker_config<F>(lookup: &F) -> Result<Option<RerankerConfig>, AppError>
 where
     F: Fn(&str) -> Option<String>,
@@ -307,7 +338,7 @@ where
     }))
 }
 
-#[cfg(feature = "vector")]
+#[cfg(feature = "local-embeddings")]
 fn parse_reranker_model(value: &str) -> Result<RerankerModel, AppError> {
     match value {
         "BAAI/bge-reranker-base" | "bge-reranker-base" | "BGERerankerBase"
@@ -320,7 +351,7 @@ fn parse_reranker_model(value: &str) -> Result<RerankerModel, AppError> {
     }
 }
 
-#[cfg(feature = "vector")]
+#[cfg(feature = "local-embeddings")]
 fn optional_non_empty_string<F>(lookup: &F, key: &str) -> Option<String>
 where
     F: Fn(&str) -> Option<String>,
@@ -416,13 +447,13 @@ mod tests {
     #[test]
     fn uses_defaults() {
         let cfg = AppConfig::from_lookup(|key| {
-            #[cfg(feature = "vector")]
+            #[cfg(feature = "local-embeddings")]
             {
                 let _ = key;
                 None
             }
 
-            #[cfg(not(feature = "vector"))]
+            #[cfg(not(feature = "local-embeddings"))]
             {
                 let _ = key;
                 None
@@ -496,7 +527,7 @@ mod tests {
         assert!(cfg.is_err());
     }
 
-    #[cfg(feature = "vector")]
+    #[cfg(feature = "local-embeddings")]
     #[test]
     fn validates_vector_configuration() {
         let cfg = AppConfig::from_lookup(|key| match key {
@@ -514,11 +545,12 @@ mod tests {
         assert_eq!(cfg.embedding.dimension, 384);
         assert!(cfg.embedding.cache_dir.is_none());
         assert!(cfg.reranker.is_none());
-        assert_eq!(cfg.max_vector_top_k, 200);
-        assert_eq!(cfg.max_rerank_fetch_k, 500);
+        assert_eq!(cfg.vector.dimension, 384);
+        assert_eq!(cfg.vector.max_top_k, 200);
+        assert_eq!(cfg.vector.max_rerank_fetch_k, 500);
     }
 
-    #[cfg(feature = "vector")]
+    #[cfg(feature = "local-embeddings")]
     #[test]
     fn resolves_embedding_cache_dir() {
         let cfg = AppConfig::from_lookup(|key| match key {
@@ -534,7 +566,7 @@ mod tests {
         assert!(cache_dir.is_absolute());
     }
 
-    #[cfg(feature = "vector")]
+    #[cfg(feature = "local-embeddings")]
     #[test]
     fn uses_reranker_defaults_when_enabled() {
         let cfg = AppConfig::from_lookup(|key| match key {
@@ -552,7 +584,7 @@ mod tests {
         assert!(reranker.cache_dir.is_none());
     }
 
-    #[cfg(feature = "vector")]
+    #[cfg(feature = "local-embeddings")]
     #[test]
     fn resolves_reranker_cache_dir() {
         let cfg = AppConfig::from_lookup(|key| match key {
@@ -565,5 +597,19 @@ mod tests {
         let reranker = cfg.reranker.expect("reranker should be configured");
         let cache_dir = reranker.cache_dir.expect("cache dir should be present");
         assert!(cache_dir.is_absolute());
+    }
+
+    #[cfg(all(feature = "vector", not(feature = "local-embeddings")))]
+    #[test]
+    fn resolves_vector_dimension_without_local_embeddings() {
+        let cfg = AppConfig::from_lookup(|key| match key {
+            "SQLITE_VECTOR_DIMENSION" => Some("768".to_string()),
+            _ => None,
+        })
+        .expect("vector config should parse");
+
+        assert_eq!(cfg.vector.dimension, 768);
+        assert_eq!(cfg.vector.max_top_k, 200);
+        assert_eq!(cfg.vector.max_rerank_fetch_k, 500);
     }
 }

@@ -1,15 +1,20 @@
 use std::cmp::Ordering;
-#[cfg(test)]
+#[cfg(all(test, feature = "local-embeddings"))]
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 
 use crate::DEFAULT_DB_ID;
-use crate::adapters::embeddings::{EmbeddingClient, serialize_embedding_json};
+#[cfg(feature = "local-embeddings")]
+use crate::adapters::embeddings::EmbeddingClient;
+#[cfg(feature = "local-embeddings")]
 use crate::adapters::ort_runtime::current_ort_dylib_path;
+#[cfg(feature = "local-embeddings")]
 use crate::adapters::reranker::RerankerClient;
+#[cfg(feature = "local-embeddings")]
 use crate::config::{EmbeddingConfig, RerankerConfig};
 use crate::contracts::common::{ToolEnvelope, ToolHint};
 use crate::contracts::vector::{
@@ -24,32 +29,66 @@ use crate::errors::{AppError, AppResult};
 use crate::policy::is_valid_identifier;
 use crate::server::finalize::finalize_tool;
 
+enum EmbeddingBackend {
+    Unavailable,
+    #[cfg(feature = "local-embeddings")]
+    Local(Box<EmbeddingClient>),
+}
+
+enum RerankerBackend {
+    #[cfg(feature = "local-embeddings")]
+    Local(RerankerClient),
+}
+
 pub struct VectorRuntime {
-    embedding: EmbeddingClient,
-    reranker: Option<RerankerClient>,
+    dimension: usize,
+    embedding: EmbeddingBackend,
+    reranker: Option<RerankerBackend>,
 }
 
 impl VectorRuntime {
-    pub fn new(embedding: EmbeddingConfig, reranker: Option<RerankerConfig>) -> Self {
+    #[cfg(feature = "local-embeddings")]
+    pub fn new(
+        dimension: usize,
+        embedding: Option<EmbeddingConfig>,
+        reranker: Option<RerankerConfig>,
+    ) -> Self {
         Self {
-            embedding: EmbeddingClient::new(embedding),
-            reranker: reranker.map(RerankerClient::new),
+            dimension,
+            embedding: embedding.map_or(EmbeddingBackend::Unavailable, |config| {
+                EmbeddingBackend::Local(Box::new(EmbeddingClient::new(config)))
+            }),
+            reranker: reranker.map(|config| RerankerBackend::Local(RerankerClient::new(config))),
+        }
+    }
+
+    #[cfg(not(feature = "local-embeddings"))]
+    pub fn new(dimension: usize) -> Self {
+        Self {
+            dimension,
+            embedding: EmbeddingBackend::Unavailable,
+            reranker: None,
         }
     }
 
     #[cfg(test)]
+    #[cfg(feature = "local-embeddings")]
     fn with_test_embeddings(
         embedding: EmbeddingConfig,
         reranker: Option<RerankerConfig>,
         embeddings: HashMap<String, Vec<f32>>,
     ) -> Self {
         Self {
-            embedding: EmbeddingClient::new_test(embedding, embeddings),
-            reranker: reranker.map(RerankerClient::new),
+            dimension: embedding.dimension,
+            embedding: EmbeddingBackend::Local(Box::new(EmbeddingClient::new_test(
+                embedding, embeddings,
+            ))),
+            reranker: reranker.map(|config| RerankerBackend::Local(RerankerClient::new(config))),
         }
     }
 
     #[cfg(test)]
+    #[cfg(feature = "local-embeddings")]
     fn with_test_clients(
         embedding: EmbeddingConfig,
         reranker: Option<RerankerConfig>,
@@ -57,33 +96,171 @@ impl VectorRuntime {
         rerank_scores: Option<HashMap<String, Vec<f64>>>,
     ) -> Self {
         Self {
-            embedding: EmbeddingClient::new_test(embedding, embeddings),
+            dimension: embedding.dimension,
+            embedding: EmbeddingBackend::Local(Box::new(EmbeddingClient::new_test(
+                embedding, embeddings,
+            ))),
             reranker: match (reranker, rerank_scores) {
-                (Some(config), Some(scores)) => Some(RerankerClient::new_test(config, scores)),
-                (Some(config), None) => Some(RerankerClient::new(config)),
+                (Some(config), Some(scores)) => Some(RerankerBackend::Local(
+                    RerankerClient::new_test(config, scores),
+                )),
+                (Some(config), None) => Some(RerankerBackend::Local(RerankerClient::new(config))),
                 (None, _) => None,
             },
         }
     }
 
-    fn prewarm_embedding(&self) -> AppResult<()> {
-        self.embedding.prewarm()
+    pub fn dimension(&self) -> usize {
+        self.dimension
     }
 
+    fn embedding_provider(&self) -> &'static str {
+        match &self.embedding {
+            EmbeddingBackend::Unavailable => "none",
+            #[cfg(feature = "local-embeddings")]
+            EmbeddingBackend::Local(client) => match client.provider() {
+                crate::config::EmbeddingProvider::Fastembed => "fastembed",
+            },
+        }
+    }
+
+    fn embedding_model(&self) -> &str {
+        match &self.embedding {
+            EmbeddingBackend::Unavailable => "not_configured",
+            #[cfg(feature = "local-embeddings")]
+            EmbeddingBackend::Local(client) => client.model(),
+        }
+    }
+
+    fn embedding_cache_dir(&self) -> Option<PathBuf> {
+        match &self.embedding {
+            EmbeddingBackend::Unavailable => None,
+            #[cfg(feature = "local-embeddings")]
+            EmbeddingBackend::Local(client) => client.cache_dir_path(),
+        }
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    fn reranker_provider(&self) -> &'static str {
+        match &self.reranker {
+            Some(RerankerBackend::Local(client)) => match client.provider() {
+                crate::config::RerankerProvider::Fastembed => "fastembed",
+            },
+            None => "none",
+        }
+    }
+
+    #[cfg(not(feature = "local-embeddings"))]
+    fn reranker_provider(&self) -> &'static str {
+        "none"
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    fn reranker_model(&self) -> &str {
+        match &self.reranker {
+            Some(RerankerBackend::Local(client)) => client.model(),
+            None => "not_configured",
+        }
+    }
+
+    #[cfg(not(feature = "local-embeddings"))]
+    fn reranker_model(&self) -> &str {
+        "not_configured"
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    fn reranker_cache_dir(&self) -> Option<PathBuf> {
+        match &self.reranker {
+            Some(RerankerBackend::Local(client)) => client.cache_dir_path(),
+            None => None,
+        }
+    }
+
+    #[cfg(not(feature = "local-embeddings"))]
+    fn reranker_cache_dir(&self) -> Option<PathBuf> {
+        None
+    }
+
+    fn prewarm_embedding(&self) -> AppResult<()> {
+        match &self.embedding {
+            EmbeddingBackend::Unavailable => Err(AppError::Dependency(
+                "no embedding backend is configured".to_string(),
+            )),
+            #[cfg(feature = "local-embeddings")]
+            EmbeddingBackend::Local(client) => client.prewarm(),
+        }
+    }
+
+    #[cfg(feature = "local-embeddings")]
     fn prewarm_reranker(&self) -> AppResult<()> {
         match &self.reranker {
-            Some(client) => client.prewarm(),
+            Some(RerankerBackend::Local(client)) => client.prewarm(),
             None => Ok(()),
         }
     }
 
+    #[cfg(not(feature = "local-embeddings"))]
+    fn prewarm_reranker(&self) -> AppResult<()> {
+        Ok(())
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    fn embed(&self, text: &str) -> AppResult<Vec<f32>> {
+        match &self.embedding {
+            EmbeddingBackend::Unavailable => Err(AppError::Dependency(
+                "no embedding backend is configured".to_string(),
+            )),
+            #[cfg(feature = "local-embeddings")]
+            EmbeddingBackend::Local(client) => client.embed(text),
+        }
+    }
+
+    #[cfg(not(feature = "local-embeddings"))]
+    fn embed(&self, _text: &str) -> AppResult<Vec<f32>> {
+        Err(AppError::Dependency(
+            "no embedding backend is configured".to_string(),
+        ))
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    fn rerank(&self, query: &str, docs: &[String]) -> AppResult<Option<Vec<f64>>> {
+        match &self.reranker {
+            Some(RerankerBackend::Local(client)) => client.rerank(query, docs).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    #[cfg(not(feature = "local-embeddings"))]
+    fn rerank(&self, _query: &str, _docs: &[String]) -> AppResult<Option<Vec<f64>>> {
+        Ok(None)
+    }
+
+    fn ort_dylib_path(&self) -> Option<PathBuf> {
+        #[cfg(feature = "local-embeddings")]
+        {
+            current_ort_dylib_path()
+        }
+
+        #[cfg(not(feature = "local-embeddings"))]
+        {
+            None
+        }
+    }
+
     pub fn prewarm_startup(&self) -> AppResult<()> {
+        if matches!(self.embedding, EmbeddingBackend::Unavailable) {
+            tracing::info!("embedding prewarm skipped (no embedding backend configured)");
+            if self.reranker.is_none() {
+                tracing::info!("reranker prewarm skipped (not configured)");
+            }
+            return Ok(());
+        }
+
         tracing::info!(
-            embedding_provider = %embedding_provider_name(self),
-            embedding_model = %self.embedding.model(),
+            embedding_provider = %self.embedding_provider(),
+            embedding_model = %self.embedding_model(),
             embedding_cache_dir = %self
-                .embedding
-                .cache_dir_path()
+                .embedding_cache_dir()
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "<default>".to_string()),
             "prewarming embedding runtime"
@@ -92,11 +269,12 @@ impl VectorRuntime {
         tracing::info!("embedding runtime prewarm complete");
 
         if let Some(reranker) = &self.reranker {
+            let _ = reranker;
             tracing::info!(
-                reranker_provider = %reranker_provider_name(reranker),
-                reranker_model = %reranker.model(),
-                reranker_cache_dir = %reranker
-                    .cache_dir_path()
+                reranker_provider = %self.reranker_provider(),
+                reranker_model = %self.reranker_model(),
+                reranker_cache_dir = %self
+                    .reranker_cache_dir()
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| "<default>".to_string()),
                 "prewarming reranker runtime"
@@ -122,42 +300,46 @@ pub fn vector_status(
     let mut embedding_issues = Vec::new();
     let mut reranker_issues = Vec::new();
     let mut ort_issues = Vec::new();
-    let mut ort_ready = current_ort_dylib_path().is_some_and(|path| path.exists());
+    let mut ort_ready = runtime.ort_dylib_path().is_some_and(|path| path.exists());
 
     if request.prewarm {
         if let Err(error) = runtime.prewarm_embedding() {
             embedding_issues.push(vector_issue_from_error("embedding_init", &error));
-            ort_issues.push(vector_issue_from_error("ort_runtime", &error));
+            if !is_backend_unconfigured(&error) {
+                ort_issues.push(vector_issue_from_error("ort_runtime", &error));
+            }
         }
 
         if let Err(error) = runtime.prewarm_reranker() {
             reranker_issues.push(vector_issue_from_error("reranker_init", &error));
-            ort_issues.push(vector_issue_from_error("ort_runtime", &error));
+            if !is_backend_unconfigured(&error) {
+                ort_issues.push(vector_issue_from_error("ort_runtime", &error));
+            }
         }
     }
 
-    let ort_path = current_ort_dylib_path();
+    let ort_path = runtime.ort_dylib_path();
     ort_ready = ort_ready || ort_path.as_ref().is_some_and(|path| path.exists());
 
     let embedding = VectorBackendStatus {
-        provider: embedding_provider_name(runtime).to_string(),
-        model: runtime.embedding.model().to_string(),
-        dimension: runtime.embedding.dimension(),
+        provider: runtime.embedding_provider().to_string(),
+        model: runtime.embedding_model().to_string(),
+        dimension: runtime.dimension(),
         cache_dir: runtime
-            .embedding
-            .cache_dir_path()
+            .embedding_cache_dir()
             .map(|path| path.display().to_string()),
-        ready: embedding_issues.is_empty(),
+        ready: !matches!(runtime.embedding, EmbeddingBackend::Unavailable)
+            && embedding_issues.is_empty(),
         issues: embedding_issues,
     };
 
-    let reranker = if let Some(client) = runtime.reranker.as_ref() {
+    let reranker = if runtime.reranker.is_some() {
         VectorBackendStatus {
-            provider: reranker_provider_name(client).to_string(),
-            model: client.model().to_string(),
+            provider: runtime.reranker_provider().to_string(),
+            model: runtime.reranker_model().to_string(),
             dimension: 0,
-            cache_dir: client
-                .cache_dir_path()
+            cache_dir: runtime
+                .reranker_cache_dir()
                 .map(|path| path.display().to_string()),
             ready: reranker_issues.is_empty(),
             issues: reranker_issues,
@@ -231,15 +413,12 @@ pub fn vector_collection_create(
         ));
     }
 
-    runtime
-        .prewarm_embedding()
-        .map_err(|error| vector_dependency_error("embedding_init", runtime, error))?;
-
-    let dimension = runtime.embedding.dimension();
+    let dimension = runtime.dimension();
     if dimension == 0 {
-        return Err(AppError::Dependency(
-            "embedding model returned invalid dimension".to_string(),
-        ));
+        return Err(AppError::Dependency(format!(
+            "embedding backend is not available for vector collection creation: configured dimension is invalid; embedding_model={}",
+            runtime.embedding_model()
+        )));
     }
 
     let docs_table = format!("{}_docs", request.collection);
@@ -284,7 +463,7 @@ pub fn vector_collection_create(
                     docs_table.as_str(),
                     vec_table.as_str(),
                     dimension as i64,
-                    runtime.embedding.model(),
+                    runtime.embedding_model(),
                 ),
             )?;
 
@@ -413,7 +592,6 @@ pub fn vector_upsert(
     let upsert_result = (|| -> AppResult<()> {
         for item in request.items {
             let embedding = runtime
-                .embedding
                 .embed(&item.text)
                 .map_err(|error| vector_dependency_error("embedding_upsert", runtime, error))?;
             if embedding.len() != collection.dimension {
@@ -537,7 +715,6 @@ pub fn vector_search(
         .prewarm_embedding()
         .map_err(|error| vector_dependency_error("embedding_init", runtime, error))?;
     let query_embedding = runtime
-        .embedding
         .embed(&request.query_text)
         .map_err(|error| vector_dependency_error("embedding_query", runtime, error))?;
     if query_embedding.len() != collection.dimension {
@@ -638,14 +815,14 @@ pub fn vector_search(
     };
 
     if rerank_mode == RerankMode::On {
-        if let Some(reranker) = &runtime.reranker {
+        if runtime.reranker.is_some() {
             let docs = selected
                 .iter()
                 .map(|candidate| candidate.text.clone())
                 .collect::<Vec<_>>();
 
-            match reranker.rerank(&request.query_text, &docs) {
-                Ok(scores) => {
+            match runtime.rerank(&request.query_text, &docs) {
+                Ok(Some(scores)) => {
                     if scores.len() != selected.len() {
                         issues.push(VectorIssue {
                             stage: "rerank".to_string(),
@@ -675,8 +852,23 @@ pub fn vector_search(
                         });
                         selected.truncate(top_k);
                         reranked = true;
-                        rerank_model = reranker.model().to_string();
+                        rerank_model = runtime.reranker_model().to_string();
                     }
+                }
+                Ok(None) => {
+                    issues.push(VectorIssue {
+                        stage: "rerank".to_string(),
+                        code: "RERANK_UNAVAILABLE".to_string(),
+                        message: "rerank requested but no reranker provider is configured"
+                            .to_string(),
+                        retryable: false,
+                    });
+                    selected.sort_by(|left, right| {
+                        left.distance
+                            .partial_cmp(&right.distance)
+                            .unwrap_or(Ordering::Equal)
+                    });
+                    selected.truncate(top_k);
                 }
                 Err(error) => {
                     issues.push(VectorIssue {
@@ -823,15 +1015,21 @@ fn metadata_matches(
         .all(|(key, value)| metadata.get(key) == Some(value))
 }
 
+fn serialize_embedding_json(embedding: &[f32]) -> AppResult<String> {
+    serde_json::to_string(embedding)
+        .map_err(|error| AppError::Dependency(format!("failed to serialize embedding: {error}")))
+}
+
 fn vector_dependency_error(stage: &str, runtime: &VectorRuntime, error: AppError) -> AppError {
-    let ort_path = current_ort_dylib_path().map(|path| path.display().to_string());
+    let ort_path = runtime
+        .ort_dylib_path()
+        .map(|path| path.display().to_string());
     let message = vector_dependency_message(stage, &error.to_string());
     AppError::Dependency(format!(
-        "{message}; embedding_model={}; embedding_cache_dir={}; ort_dylib_path={}; run vector_status with {{\"prewarm\":true}} for diagnostics",
-        runtime.embedding.model(),
+        "{message}; vector backend is not available; embedding_model={}; embedding_cache_dir={}; ort_dylib_path={}; run vector_status with {{\"prewarm\":true}} for diagnostics",
+        runtime.embedding_model(),
         runtime
-            .embedding
-            .cache_dir_path()
+            .embedding_cache_dir()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "<default>".to_string()),
         ort_path.unwrap_or_else(|| "<unset>".to_string()),
@@ -850,7 +1048,16 @@ fn vector_dependency_message(stage: &str, raw: &str) -> String {
     if raw.contains("failed downloading ONNX Runtime") {
         return format!("{stage} failed while downloading ONNX Runtime");
     }
+    if raw.contains("Failed to load ONNX Runtime dylib") {
+        return format!("{stage} failed because ONNX Runtime could not be loaded");
+    }
     format!("{stage} failed: {raw}")
+}
+
+fn is_backend_unconfigured(error: &AppError) -> bool {
+    error
+        .to_string()
+        .contains("no embedding backend is configured")
 }
 
 fn vector_issue_from_error(stage: &str, error: &AppError) -> VectorIssue {
@@ -858,41 +1065,41 @@ fn vector_issue_from_error(stage: &str, error: &AppError) -> VectorIssue {
         stage: stage.to_string(),
         code: "DEPENDENCY_ERROR".to_string(),
         message: vector_dependency_message(stage, &error.to_string()),
-        retryable: true,
-    }
-}
-
-fn embedding_provider_name(runtime: &VectorRuntime) -> &'static str {
-    match runtime.embedding.provider() {
-        crate::config::EmbeddingProvider::Fastembed => "fastembed",
-    }
-}
-
-fn reranker_provider_name(client: &RerankerClient) -> &'static str {
-    match client.provider() {
-        crate::config::RerankerProvider::Fastembed => "fastembed",
+        retryable: !is_backend_unconfigured(error),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "local-embeddings")]
     use std::collections::HashMap;
 
+    #[cfg(feature = "local-embeddings")]
     use serde_json::{Map, Value};
 
+    #[cfg(feature = "local-embeddings")]
     use crate::config::{EmbeddingConfig, EmbeddingProvider, RerankerConfig, RerankerProvider};
     use crate::contracts::db::DbMode;
+    #[cfg(feature = "local-embeddings")]
     use crate::contracts::vector::{
         RerankMode, VectorCollectionCreateRequest, VectorConflictMode, VectorDocument,
         VectorSearchRequest, VectorStatusRequest, VectorUpsertRequest,
     };
+    #[cfg(not(feature = "local-embeddings"))]
+    use crate::contracts::vector::{VectorCollectionCreateRequest, VectorStatusRequest};
     use crate::db::registry::DbRegistry;
+    #[cfg(feature = "local-embeddings")]
     use crate::errors::AppError;
 
+    #[cfg(feature = "local-embeddings")]
     use super::{
-        VectorRuntime, vector_collection_create, vector_search, vector_status, vector_upsert,
+        VectorRuntime, vector_collection_create, vector_collection_list, vector_search,
+        vector_status, vector_upsert,
     };
+    #[cfg(not(feature = "local-embeddings"))]
+    use super::{VectorRuntime, vector_collection_create, vector_collection_list, vector_status};
 
+    #[cfg(feature = "local-embeddings")]
     fn embedding_config(dimension: usize) -> EmbeddingConfig {
         EmbeddingConfig {
             provider: EmbeddingProvider::Fastembed,
@@ -917,6 +1124,19 @@ mod tests {
         registry
     }
 
+    fn runtime_without_backend(dimension: usize) -> VectorRuntime {
+        #[cfg(feature = "local-embeddings")]
+        {
+            VectorRuntime::new(dimension, None, None)
+        }
+
+        #[cfg(not(feature = "local-embeddings"))]
+        {
+            VectorRuntime::new(dimension)
+        }
+    }
+
+    #[cfg(feature = "local-embeddings")]
     fn reranker_config() -> RerankerConfig {
         RerankerConfig {
             provider: RerankerProvider::Fastembed,
@@ -925,6 +1145,98 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "local-embeddings")]
+    fn live_embedding_config(dimension: usize) -> EmbeddingConfig {
+        EmbeddingConfig {
+            provider: EmbeddingProvider::Fastembed,
+            model: "BAAI/bge-small-en-v1.5".to_string(),
+            cache_dir: Some(std::env::temp_dir().join("sqlite-mcp-vector-test-cache")),
+            dimension,
+        }
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    impl EnvVarGuard {
+        fn set_missing_ort_path() -> Self {
+            let key = "ORT_DYLIB_PATH";
+            let original = std::env::var_os(key);
+            let missing_path = std::env::temp_dir()
+                .join(format!("sqlite-mcp-missing-ort-{}", uuid::Uuid::new_v4()));
+            unsafe {
+                std::env::set_var(key, &missing_path);
+            }
+            Self { key, original }
+        }
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(value) = &self.original {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vector_collection_create_uses_configured_dimension_without_embedding_backend() {
+        let registry = setup_registry();
+        let runtime = runtime_without_backend(768);
+
+        let created = vector_collection_create(
+            &registry,
+            &runtime,
+            VectorCollectionCreateRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                if_not_exists: false,
+            },
+            u64::MAX,
+        )
+        .expect("collection create should succeed without an embedding backend");
+
+        assert!(created.data.created);
+        let collections = vector_collection_list(
+            &registry,
+            crate::contracts::vector::VectorCollectionListRequest { db_id: None },
+        )
+        .expect("collection list should succeed");
+        assert_eq!(collections.data.collections.len(), 1);
+        assert_eq!(collections.data.collections[0].dimension, 768);
+    }
+
+    #[test]
+    fn vector_status_reports_unconfigured_backend_without_failing() {
+        let runtime = runtime_without_backend(384);
+
+        let status = vector_status(
+            &runtime,
+            VectorStatusRequest {
+                db_id: None,
+                prewarm: true,
+            },
+        )
+        .expect("status should succeed without an embedding backend");
+
+        assert!(!status.data.embedding.ready);
+        assert_eq!(status.data.embedding.provider, "none");
+        assert_eq!(status.data.embedding.model, "not_configured");
+        assert_eq!(status.data.embedding.dimension, 384);
+        assert!(!status.data.embedding.issues.is_empty());
+        assert!(!status.data.ort_ready);
+    }
+
+    #[cfg(feature = "local-embeddings")]
     #[test]
     fn vector_happy_path_creates_upserts_and_searches() {
         let registry = setup_registry();
@@ -1019,6 +1331,7 @@ mod tests {
         assert!(searched.data.issues.is_empty());
     }
 
+    #[cfg(feature = "local-embeddings")]
     #[test]
     fn vector_upsert_fails_on_dimension_mismatch() {
         let registry = setup_registry();
@@ -1065,6 +1378,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "local-embeddings")]
     #[test]
     fn vector_search_reports_rerank_unavailable() {
         let registry = setup_registry();
@@ -1138,6 +1452,7 @@ mod tests {
         assert_eq!(searched.data.issues[0].code, "RERANK_UNAVAILABLE");
     }
 
+    #[cfg(feature = "local-embeddings")]
     #[test]
     fn vector_search_uses_reranker_scores_when_available() {
         let registry = setup_registry();
@@ -1215,6 +1530,7 @@ mod tests {
         assert_eq!(searched.data.matches[0].score, Some(0.9));
     }
 
+    #[cfg(feature = "local-embeddings")]
     #[test]
     fn vector_search_rejects_top_k_above_limit() {
         let registry = setup_registry();
@@ -1283,6 +1599,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "local-embeddings")]
     #[test]
     fn vector_search_rejects_rerank_fetch_k_below_top_k() {
         let registry = setup_registry();
@@ -1351,6 +1668,148 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "local-embeddings")]
+    #[test]
+    fn vector_collection_create_succeeds_when_embedding_backend_is_unavailable() {
+        let _guard = EnvVarGuard::set_missing_ort_path();
+        let registry = setup_registry();
+        let runtime = VectorRuntime::new(384, Some(live_embedding_config(384)), None);
+
+        let created = vector_collection_create(
+            &registry,
+            &runtime,
+            VectorCollectionCreateRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                if_not_exists: false,
+            },
+            u64::MAX,
+        )
+        .expect("collection create should not depend on live embedding backend");
+
+        assert!(created.data.created);
+        assert_eq!(created.data.collection, "items");
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[test]
+    fn vector_upsert_reports_embedding_backend_unavailable() {
+        let _guard = EnvVarGuard::set_missing_ort_path();
+        let registry = setup_registry();
+        let runtime = VectorRuntime::new(384, Some(live_embedding_config(384)), None);
+
+        vector_collection_create(
+            &registry,
+            &runtime,
+            VectorCollectionCreateRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                if_not_exists: false,
+            },
+            u64::MAX,
+        )
+        .expect("collection create should succeed");
+
+        let error = vector_upsert(
+            &registry,
+            &runtime,
+            VectorUpsertRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                on_conflict: VectorConflictMode::Replace,
+                items: vec![VectorDocument {
+                    id: "a".to_string(),
+                    text: "doc-alpha".to_string(),
+                    metadata: None,
+                }],
+            },
+            u64::MAX,
+        )
+        .expect_err("upsert should fail when embedding backend is unavailable");
+
+        match error {
+            AppError::Dependency(message) => {
+                assert!(message.contains("vector backend is not available"));
+                assert!(message.contains("embedding_init failed"));
+            }
+            other => panic!("expected dependency error, got: {other}"),
+        }
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[test]
+    fn vector_search_reports_embedding_backend_unavailable() {
+        let _guard = EnvVarGuard::set_missing_ort_path();
+        let registry = setup_registry();
+        let runtime = VectorRuntime::new(384, Some(live_embedding_config(384)), None);
+
+        vector_collection_create(
+            &registry,
+            &runtime,
+            VectorCollectionCreateRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                if_not_exists: false,
+            },
+            u64::MAX,
+        )
+        .expect("collection create should succeed");
+
+        let error = vector_search(
+            &registry,
+            &runtime,
+            VectorSearchRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                query_text: "query-alpha".to_string(),
+                top_k: Some(1),
+                include_text: false,
+                include_metadata: false,
+                filter: None,
+                rerank: RerankMode::Off,
+                rerank_fetch_k: None,
+            },
+            200,
+            500,
+        )
+        .expect_err("search should fail when embedding backend is unavailable");
+
+        match error {
+            AppError::Dependency(message) => {
+                assert!(message.contains("vector backend is not available"));
+                assert!(message.contains("embedding_init failed"));
+            }
+            other => panic!("expected dependency error, got: {other}"),
+        }
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[test]
+    fn vector_status_reports_degraded_backends_without_failing() {
+        let _guard = EnvVarGuard::set_missing_ort_path();
+        let runtime = VectorRuntime::new(
+            384,
+            Some(live_embedding_config(384)),
+            Some(reranker_config()),
+        );
+
+        let status = vector_status(
+            &runtime,
+            VectorStatusRequest {
+                db_id: None,
+                prewarm: true,
+            },
+        )
+        .expect("status should succeed even when backends are unavailable");
+
+        assert!(!status.data.embedding.ready);
+        assert!(!status.data.embedding.issues.is_empty());
+        assert!(!status.data.reranker.ready);
+        assert!(!status.data.reranker.issues.is_empty());
+        assert!(!status.data.ort_ready);
+    }
+
+    #[cfg(feature = "local-embeddings")]
     #[test]
     fn vector_status_reports_ready_with_test_embeddings() {
         let runtime = VectorRuntime::with_test_embeddings(
@@ -1376,6 +1835,7 @@ mod tests {
         assert_eq!(status.data.reranker.provider, "none");
     }
 
+    #[cfg(feature = "local-embeddings")]
     #[test]
     fn vector_status_reports_reranker_ready_with_test_clients() {
         let runtime = VectorRuntime::with_test_clients(

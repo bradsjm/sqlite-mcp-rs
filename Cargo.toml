@@ -2,6 +2,7 @@
 name = "sqlite-mcp-rs"
 version = "0.3.0"
 edition = "2024"
+rust-version = "1.94"
 license = "MIT"
 description = "SQLite Machine (MCP) server with vector and embeddings support."
 repository = "https://github.com/bradsjm/sqlite-mcp-rs"
@@ -11,7 +12,8 @@ categories = ["database"]
 
 [features]
 default = []
-vector = ["dep:fastembed", "dep:sqlite-vec", "dep:reqwest", "dep:flate2", "dep:tar", "dep:zip"]
+vector = ["dep:sqlite-vec"]
+local-embeddings = ["vector", "dep:fastembed", "dep:reqwest", "dep:flate2", "dep:tar", "dep:zip"]
 
 [dependencies]
 axum = "0.8.4"

@@ -1,5 +1,6 @@
 #[cfg(test)]
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -151,7 +152,10 @@ impl EmbeddingClient {
         }
         options = options.with_show_download_progress(false);
 
-        let model = TextEmbedding::try_new(options).map_err(|error| {
+        let model = catch_init_panic("failed to initialize embedding model", || {
+            TextEmbedding::try_new(options)
+        })?
+        .map_err(|error| {
             AppError::Dependency(format!("failed to initialize embedding model: {error}"))
         })?;
         *guard = Some(model);
@@ -191,6 +195,25 @@ fn normalize_embedding(embedding: &mut [f32]) {
     }
 }
 
+fn catch_init_panic<T, F>(context: &str, init: F) -> AppResult<T>
+where
+    F: FnOnce() -> T,
+{
+    catch_unwind(AssertUnwindSafe(init)).map_err(|panic_payload| {
+        AppError::Dependency(format!("{context}: {}", panic_message(panic_payload)))
+    })
+}
+
+fn panic_message(panic_payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = panic_payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = panic_payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "panic during model initialization".to_string()
+}
+
 #[allow(dead_code)]
 fn _model_dimension(model: &EmbeddingModel) -> Option<usize> {
     EmbeddingModel::get_model_info(model).map(|info| info.dim)
@@ -199,10 +222,11 @@ fn _model_dimension(model: &EmbeddingModel) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use crate::config::{EmbeddingConfig, EmbeddingProvider};
 
-    use super::{EmbeddingClient, serialize_embedding_json};
+    use super::{EmbeddingClient, catch_init_panic, panic_message, serialize_embedding_json};
 
     fn test_config(dimension: usize) -> EmbeddingConfig {
         EmbeddingConfig {
@@ -238,5 +262,25 @@ mod tests {
         let serialized =
             serialize_embedding_json(&[0.5, -0.25, 1.0]).expect("serialize should work");
         assert_eq!(serialized, "[0.5,-0.25,1.0]");
+    }
+
+    #[test]
+    fn panic_payload_stringifies_message() {
+        let payload = catch_unwind(AssertUnwindSafe(|| panic!("embedding panic")))
+            .expect_err("panic expected");
+        assert_eq!(panic_message(payload), "embedding panic");
+    }
+
+    #[test]
+    fn catch_init_panic_maps_panics_to_dependency_errors() {
+        let error = catch_init_panic::<(), _>("failed to initialize embedding model", || {
+            panic!("embedding panic")
+        })
+        .expect_err("panic should be converted");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to initialize embedding model: embedding panic")
+        );
     }
 }

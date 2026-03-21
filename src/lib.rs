@@ -34,7 +34,7 @@ pub mod policy;
 pub mod server;
 pub mod tools;
 
-#[cfg(feature = "vector")]
+#[cfg(feature = "local-embeddings")]
 pub mod adapters;
 
 /// Default database identifier used when none is specified.

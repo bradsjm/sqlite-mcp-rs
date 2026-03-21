@@ -40,6 +40,8 @@ Local stdio transport with latest image:
 docker run --rm -i --env-file .env ghcr.io/bradsjm/sqlite-mcp-rs:latest
 ```
 
+The published Docker image uses a glibc runtime and includes local embedding/reranking support.
+
 Run over HTTP transport:
 
 ```bash
@@ -130,17 +132,29 @@ SQLITE_QUEUE_POLL_INTERVAL_MS_MAX=5000
 
 ### Vector Feature (Optional)
 
-Build/run with vector support:
+Build/run with vector collection support:
 
 ```bash
 cargo run --features vector
 ```
 
+Add local embeddings and reranking:
+
+```bash
+cargo run --features "vector local-embeddings"
+```
+
 Vector environment variables:
 
 ```bash
+SQLITE_VECTOR_DIMENSION=384
 SQLITE_MAX_VECTOR_TOP_K=200
 SQLITE_MAX_RERANK_FETCH_K=500
+```
+
+Local embedding environment variables (`local-embeddings` feature only):
+
+```bash
 SQLITE_EMBEDDING_PROVIDER=fastembed
 SQLITE_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
 SQLITE_EMBEDDING_CACHE_DIR=                # optional
@@ -225,7 +239,7 @@ For `DROP`, `TRUNCATE`, or `DELETE` without `WHERE`, set `confirm_destructive=tr
 
 ### Vector tools unavailable
 
-Run with `--features vector` and configure embedding env vars.
+Run with `--features vector` for collection support, and `--features "vector local-embeddings"` for local embedding/reranking. Linux musl release binaries and npm Linux packages exclude `local-embeddings`.
 
 ## Development
 

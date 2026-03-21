@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-#[cfg(feature = "vector")]
+#[cfg(feature = "local-embeddings")]
 use sqlite_mcp_rs::adapters::ort_runtime::initialize_ort_dylib_env;
 use sqlite_mcp_rs::config::AppConfig;
 use sqlite_mcp_rs::server::mcp::SqliteMcpServer;
@@ -36,10 +36,9 @@ fn main() {
     match AppConfig::from_env() {
         Ok(config) => {
             init_tracing(config.log_level.as_str());
-            #[cfg(feature = "vector")]
+            #[cfg(feature = "local-embeddings")]
             if let Err(error) = initialize_ort_dylib_env(config.embedding.cache_dir.clone()) {
-                tracing::error!(error = %error, "failed to initialize ORT runtime");
-                std::process::exit(1);
+                tracing::warn!(error = %error, "failed to initialize ORT runtime; vector tools will start degraded");
             }
 
             tracing::info!(

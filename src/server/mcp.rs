@@ -128,14 +128,26 @@ impl SqliteMcpServer {
         }
 
         #[cfg(feature = "vector")]
-        let vector_runtime = Arc::new(VectorRuntime::new(
-            config.embedding.clone(),
-            config.reranker.clone(),
-        ));
+        let vector_runtime = {
+            #[cfg(feature = "local-embeddings")]
+            let runtime = VectorRuntime::new(
+                config.vector.dimension,
+                Some(config.embedding.clone()),
+                config.reranker.clone(),
+            );
+            #[cfg(not(feature = "local-embeddings"))]
+            let runtime = VectorRuntime::new(config.vector.dimension);
+            Arc::new(runtime)
+        };
         #[cfg(feature = "vector")]
         {
             tracing::info!("prewarming vector dependencies at startup");
-            vector_runtime.prewarm_startup()?;
+            if let Err(error) = vector_runtime.prewarm_startup() {
+                tracing::warn!(
+                    error = %error,
+                    "vector dependencies unavailable at startup; vector tools will run degraded"
+                );
+            }
         }
 
         let server = Self {
@@ -931,8 +943,8 @@ impl SqliteMcpServer {
             .db_id
             .clone()
             .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
-        let max_vector_top_k = self.config.max_vector_top_k;
-        let max_rerank_fetch_k = self.config.max_rerank_fetch_k;
+        let max_vector_top_k = self.config.vector.max_top_k;
+        let max_rerank_fetch_k = self.config.vector.max_rerank_fetch_k;
         let vector_runtime = Arc::clone(&self.vector_runtime);
         let response = match self
             .run_blocking(move |registry, _cursors| {

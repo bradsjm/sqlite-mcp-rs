@@ -1,10 +1,22 @@
-FROM rust:1-alpine AS builder
+ARG DEBIAN_VERSION=bookworm
+ARG RUST_VERSION=1.94
+
+FROM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS builder
 WORKDIR /app
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig linux-headers curl tar gzip
-ARG CARGO_FEATURES="vector"
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential \
+      clang \
+      curl \
+      libclang-dev \
+      libssl-dev \
+      pkg-config \
+      python3 \
+      tar \
+      gzip && \
+    rm -rf /var/lib/apt/lists/*
+ARG CARGO_FEATURES="vector local-embeddings"
 COPY . .
-# Fix: Define missing BSD types for musl compatibility (required by sqlite-vec)
-ENV CFLAGS="-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"
 RUN cargo build --release --features "$CARGO_FEATURES"
 
 FROM builder AS artifact
@@ -25,10 +37,11 @@ RUN mkdir -p /opt/onnxruntime && \
 # Pre-download HuggingFace models
 RUN chmod +x scripts/download-models.sh && ./scripts/download-models.sh
 
-FROM alpine:latest
+FROM debian:${DEBIAN_VERSION}-slim
 LABEL org.opencontainers.image.description="Bounded SQLite MCP server over stdio with typed tool contracts, cursor-based pagination, and optional vector search"
-# Install CA certificates for HTTPS (required for HuggingFace model downloads)
-RUN apk add --no-cache ca-certificates
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates libgcc-s1 libstdc++6 && \
+    rm -rf /var/lib/apt/lists/*
 COPY --from=runtime-deps /app/target/release/sqlite-mcp-rs /sqlite-mcp-rs
 COPY --from=runtime-deps /opt/onnxruntime /opt/onnxruntime
 # Copy pre-downloaded models from builder

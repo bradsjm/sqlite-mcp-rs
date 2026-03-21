@@ -1,3 +1,4 @@
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -155,7 +156,10 @@ impl RerankerClient {
         }
         options = options.with_show_download_progress(false);
 
-        let model = TextRerank::try_new(options).map_err(|error| {
+        let model = catch_init_panic("failed to initialize reranker model", || {
+            TextRerank::try_new(options)
+        })?
+        .map_err(|error| {
             AppError::Dependency(format!("failed to initialize reranker model: {error}"))
         })?;
         *guard = Some(model);
@@ -176,16 +180,36 @@ fn parse_reranker_model(model: &str) -> RerankerModel {
     }
 }
 
+fn catch_init_panic<T, F>(context: &str, init: F) -> AppResult<T>
+where
+    F: FnOnce() -> T,
+{
+    catch_unwind(AssertUnwindSafe(init)).map_err(|panic_payload| {
+        AppError::Dependency(format!("{context}: {}", panic_message(panic_payload)))
+    })
+}
+
+fn panic_message(panic_payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = panic_payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = panic_payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "panic during model initialization".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::fs;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use crate::adapters::embeddings::EmbeddingClient;
     use crate::adapters::ort_runtime::initialize_ort_dylib_env;
     use crate::config::{EmbeddingConfig, EmbeddingProvider, RerankerConfig, RerankerProvider};
 
-    use super::RerankerClient;
+    use super::{RerankerClient, catch_init_panic, panic_message};
 
     fn test_config() -> RerankerConfig {
         RerankerConfig {
@@ -215,6 +239,26 @@ mod tests {
             .rerank("q", &["a".to_string(), "b".to_string()])
             .expect_err("score length mismatch must fail");
         assert!(error.to_string().contains("rerank score count mismatch"));
+    }
+
+    #[test]
+    fn panic_payload_stringifies_message() {
+        let payload = catch_unwind(AssertUnwindSafe(|| panic!("reranker panic")))
+            .expect_err("panic expected");
+        assert_eq!(panic_message(payload), "reranker panic");
+    }
+
+    #[test]
+    fn catch_init_panic_maps_panics_to_dependency_errors() {
+        let error = catch_init_panic::<(), _>("failed to initialize reranker model", || {
+            panic!("reranker panic")
+        })
+        .expect_err("panic should be converted");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to initialize reranker model: reranker panic")
+        );
     }
 
     #[test]
