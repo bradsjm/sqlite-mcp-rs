@@ -37,13 +37,6 @@ PLATFORMS = {
         "os": "win32",
         "cpu": "x64",
     },
-    "win32-arm64": {
-        "alias_name": "@bradsjm/sqlite-mcp-rs-win32-arm64",
-        "target_triple": "aarch64-pc-windows-msvc",
-        "artifact_name": "sqlite-mcp-rs-aarch64-pc-windows-msvc.zip",
-        "os": "win32",
-        "cpu": "arm64",
-    },
     "linux-x64": {
         "alias_name": "@bradsjm/sqlite-mcp-rs-linux-x64",
         "target_triple": "x86_64-unknown-linux-musl",

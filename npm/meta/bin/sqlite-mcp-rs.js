@@ -11,8 +11,7 @@ const PLATFORM_PACKAGE_BY_TARGET = {
   "aarch64-unknown-linux-musl": "@bradsjm/sqlite-mcp-rs-linux-arm64",
   "x86_64-apple-darwin": "@bradsjm/sqlite-mcp-rs-darwin-x64",
   "aarch64-apple-darwin": "@bradsjm/sqlite-mcp-rs-darwin-arm64",
-  "x86_64-pc-windows-msvc": "@bradsjm/sqlite-mcp-rs-win32-x64",
-  "aarch64-pc-windows-msvc": "@bradsjm/sqlite-mcp-rs-win32-arm64"
+  "x86_64-pc-windows-msvc": "@bradsjm/sqlite-mcp-rs-win32-x64"
 };
 
 function resolveTargetTriple() {
@@ -41,8 +40,6 @@ function resolveTargetTriple() {
       switch (process.arch) {
         case "x64":
           return "x86_64-pc-windows-msvc";
-        case "arm64":
-          return "aarch64-pc-windows-msvc";
         default:
           break;
       }

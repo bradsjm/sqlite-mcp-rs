@@ -91,11 +91,6 @@ jobs:
             binary_name: sqlite-mcp-rs.exe
             can_smoke: "true"
             use_zigbuild: "false"
-          - runner: windows-2022-arm64
-            rust_target: aarch64-pc-windows-msvc
-            binary_name: sqlite-mcp-rs.exe
-            can_smoke: "false"
-            use_zigbuild: "false"
           - runner: ubuntu-24.04
             rust_target: x86_64-unknown-linux-musl
             binary_name: sqlite-mcp-rs
@@ -364,7 +359,6 @@ jobs:
             release/sqlite-mcp-rs-aarch64-apple-darwin.tar.xz \
             release/sqlite-mcp-rs-x86_64-apple-darwin.tar.xz \
             release/sqlite-mcp-rs-x86_64-pc-windows-msvc.zip \
-            release/sqlite-mcp-rs-aarch64-pc-windows-msvc.zip \
             release/sqlite-mcp-rs-x86_64-unknown-linux-musl.tar.xz \
             release/sqlite-mcp-rs-aarch64-unknown-linux-musl.tar.xz \
             release/sha256.sum; do
@@ -380,7 +374,7 @@ jobs:
 
           Supported binaries:
           - macOS: Apple Silicon and Intel
-          - Windows: x64 and arm64
+          - Windows: x64
           - Linux: x64 and arm64 via musl builds
 
           Docker images:

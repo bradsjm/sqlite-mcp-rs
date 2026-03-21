@@ -23,7 +23,6 @@ Release workflow binaries:
 | macOS Apple Silicon | `aarch64-apple-darwin` | GitHub release archive, npm |
 | macOS Intel | `x86_64-apple-darwin` | GitHub release archive, npm |
 | Windows x64 | `x86_64-pc-windows-msvc` | GitHub release archive, npm |
-| Windows arm64 | `aarch64-pc-windows-msvc` | GitHub release archive, npm |
 | Linux x64 | `x86_64-unknown-linux-musl` | GitHub release archive, npm, Docker |
 | Linux arm64 | `aarch64-unknown-linux-musl` | GitHub release archive, npm, Docker |
 
@@ -80,7 +79,6 @@ In this repository the alias names are:
 - `@bradsjm/sqlite-mcp-rs-darwin-x64`
 - `@bradsjm/sqlite-mcp-rs-darwin-arm64`
 - `@bradsjm/sqlite-mcp-rs-win32-x64`
-- `@bradsjm/sqlite-mcp-rs-win32-arm64`
 - `@bradsjm/sqlite-mcp-rs-linux-x64`
 - `@bradsjm/sqlite-mcp-rs-linux-arm64`
 
@@ -164,7 +162,6 @@ Current matrix:
 - `aarch64-apple-darwin` on `macos-14`
 - `x86_64-apple-darwin` on `macos-15-intel`
 - `x86_64-pc-windows-msvc` on `windows-2022`
-- `aarch64-pc-windows-msvc` on `windows-2022`
 - `linux/amd64` -> `x86_64-unknown-linux-musl`
 - `linux/arm64` -> `aarch64-unknown-linux-musl`
 
@@ -361,7 +358,6 @@ Supported runtime mappings:
 | macOS x64 | `x86_64-apple-darwin` | `@bradsjm/sqlite-mcp-rs-darwin-x64` |
 | macOS arm64 | `aarch64-apple-darwin` | `@bradsjm/sqlite-mcp-rs-darwin-arm64` |
 | Windows x64 | `x86_64-pc-windows-msvc` | `@bradsjm/sqlite-mcp-rs-win32-x64` |
-| Windows arm64 | `aarch64-pc-windows-msvc` | `@bradsjm/sqlite-mcp-rs-win32-arm64` |
 
 The launcher fails fast for unsupported platform and CPU combinations.
 
