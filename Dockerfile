@@ -7,6 +7,10 @@ COPY . .
 ENV CFLAGS="-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"
 RUN cargo build --release --features "$CARGO_FEATURES"
 
+FROM builder AS artifact
+RUN cp /app/target/release/sqlite-mcp-rs /sqlite-mcp-rs
+
+FROM builder AS runtime-deps
 # Download ONNX Runtime for both architectures
 ARG TARGETARCH
 RUN mkdir -p /opt/onnxruntime && \
@@ -25,10 +29,10 @@ FROM alpine:latest
 LABEL org.opencontainers.image.description="Bounded SQLite MCP server over stdio with typed tool contracts, cursor-based pagination, and optional vector search"
 # Install CA certificates for HTTPS (required for HuggingFace model downloads)
 RUN apk add --no-cache ca-certificates
-COPY --from=builder /app/target/release/sqlite-mcp-rs /sqlite-mcp-rs
-COPY --from=builder /opt/onnxruntime /opt/onnxruntime
+COPY --from=runtime-deps /app/target/release/sqlite-mcp-rs /sqlite-mcp-rs
+COPY --from=runtime-deps /opt/onnxruntime /opt/onnxruntime
 # Copy pre-downloaded models from builder
-COPY --from=builder /root/.cache/huggingface /root/.cache/huggingface
+COPY --from=runtime-deps /root/.cache/huggingface /root/.cache/huggingface
 ENV ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so
 # Set HuggingFace cache directory
 ENV HF_HOME=/root/.cache/huggingface

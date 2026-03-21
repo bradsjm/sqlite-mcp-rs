@@ -13,12 +13,12 @@ jobs:
         permissions:
             contents: read
         env:
-            NPM_PACKAGE_NAME: "@${{ github.repository_owner }}/sqlite-mcp-rs"
             NPM_PLACEHOLDER_VERSION: "0.0.0"
             NPM_REGISTRY_URL: "https://registry.npmjs.org"
             PACKAGE_DESCRIPTION: "Placeholder for Trusted Publishing setup. This version contains no runtime code."
             PACKAGE_LICENSE: "MIT"
             PACKAGE_REPOSITORY: "https://github.com/${{ github.repository }}"
+            NPM_PACKAGE_NAME: "@${{ github.repository_owner }}/sqlite-mcp-rs"
         steps:
             - name: Checkout
               uses: actions/checkout@v6
@@ -45,7 +45,6 @@ jobs:
                   if npm view "$NPM_PACKAGE_NAME" version > /dev/null 2>&1; then
                     current_version=$(npm view "$NPM_PACKAGE_NAME" version)
                     echo "Package already exists: $NPM_PACKAGE_NAME@$current_version"
-                    echo "No placeholder publish required."
                     exit 0
                   fi
 

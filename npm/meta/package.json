@@ -1,0 +1,22 @@
+{
+  "name": "@bradsjm/sqlite-mcp-rs",
+  "version": "0.0.0-dev",
+  "license": "MIT",
+  "bin": {
+    "sqlite-mcp-rs": "bin/sqlite-mcp-rs.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bradsjm/sqlite-mcp-rs.git"
+  },
+  "homepage": "https://github.com/bradsjm/sqlite-mcp-rs#readme",
+  "bugs": {
+    "url": "https://github.com/bradsjm/sqlite-mcp-rs/issues"
+  }
+}

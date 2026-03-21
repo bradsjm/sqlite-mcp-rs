@@ -1,5 +1,9 @@
-target
-.git
-.github
+target/
+.git/
+.github/
+.fastembed_cache/
+.inspector-cache/
+__pycache__/
+.tmp/
 .fastembed_cache/
 .inspector-cache/

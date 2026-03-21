@@ -84,6 +84,12 @@ jobs:
                   cache-from: type=gha,scope=amd64
                   cache-to: type=gha,scope=amd64,mode=max
 
+            - name: Smoke test amd64 image
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  docker run --rm "${IMAGE_NAME}@${{ steps.build.outputs.digest }}" --help >/dev/null
+
     build-arm64:
         needs: meta
         runs-on: ubuntu-24.04-arm
@@ -116,6 +122,12 @@ jobs:
                   outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
                   cache-from: type=gha,scope=arm64
                   cache-to: type=gha,scope=arm64,mode=max
+
+            - name: Smoke test arm64 image
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  docker run --rm "${IMAGE_NAME}@${{ steps.build.outputs.digest }}" --help >/dev/null
 
     manifest:
         needs:
