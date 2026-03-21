@@ -3,6 +3,8 @@
 This guide is for agentic coding agents working in `sqlite-mcp-rs`.
 Follow it as the operational default for this repository.
 
+Release process documentation lives in [RELEASE.md](/Users/jonathan/Code/sqlite-mcp-rs/RELEASE.md). Read it before changing workflows, npm packaging, or Docker publishing.
+
 ## Repository Profile
 
 - Language: Rust (edition 2024)
