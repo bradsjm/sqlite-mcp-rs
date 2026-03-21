@@ -132,8 +132,11 @@ impl SqliteMcpServer {
             config.embedding.clone(),
             config.reranker.clone(),
         ));
-        tracing::info!("prewarming vector dependencies at startup");
-        vector_runtime.prewarm_startup()?;
+        #[cfg(feature = "vector")]
+        {
+            tracing::info!("prewarming vector dependencies at startup");
+            vector_runtime.prewarm_startup()?;
+        }
 
         let server = Self {
             registry: Arc::new(Mutex::new(registry)),
