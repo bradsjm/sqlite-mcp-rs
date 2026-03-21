@@ -128,9 +128,9 @@ Source: `.github/workflows/release.yml`
 1. `version`
 2. `validate`
 3. `build-release-artifacts`
-5. `package-npm`
-6. `smoke-npm-native`
-7. `publish`
+4. `package-npm`
+5. `smoke-npm-native`
+6. `publish`
 
 ### `version`
 
@@ -165,7 +165,7 @@ Purpose:
 
 Current matrix:
 
-- `aarch64-apple-darwin` on `macos-14`
+- `aarch64-apple-darwin` on `macos-15`
 - `x86_64-apple-darwin` on `macos-15-intel`
 - `x86_64-pc-windows-msvc` on `windows-2022`
 - `linux/amd64` -> `x86_64-unknown-linux-musl`
@@ -179,7 +179,7 @@ Linux implementation details:
 
 Current limitation from source:
 
-- Windows arm64 is cross-built but not locally smoke-tested in the workflow.
+- Windows arm64 is not part of the release matrix or the smoke matrix.
 
 ### `package-npm`
 
