@@ -130,24 +130,51 @@ jobs:
           set -euo pipefail
 
           case "$(uname -m)" in
-            x86_64) zig_arch="x86_64" ;;
-            aarch64|arm64) zig_arch="aarch64" ;;
+            x86_64) zig_platform_key="x86_64-linux" ;;
+            aarch64|arm64) zig_platform_key="aarch64-linux" ;;
             *)
               echo "Unsupported runner architecture: $(uname -m)"
               exit 1
               ;;
           esac
 
-          zig_dir="$RUNNER_TEMP/zig-${ZIG_VERSION}-${zig_arch}-linux"
+          zig_dir="$RUNNER_TEMP/zig-${ZIG_VERSION}-${zig_platform_key}"
           archive="$RUNNER_TEMP/zig.tar.xz"
-          url="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${zig_arch}-${ZIG_VERSION}.tar.xz"
+          index_json="$RUNNER_TEMP/zig-index.json"
+
+          curl --fail --location --silent --show-error \
+            "https://ziglang.org/download/index.json" \
+            --output "$index_json"
+
+          url=$(python - <<'PY'
+          import json
+          import os
+          import sys
+
+          with open(os.environ["ZIG_INDEX_JSON"], "r", encoding="utf-8") as handle:
+              index = json.load(handle)
+
+          version = os.environ["ZIG_VERSION"]
+          platform_key = os.environ["ZIG_PLATFORM_KEY"]
+
+          try:
+              print(index[version][platform_key]["tarball"])
+          except KeyError as exc:
+              raise SystemExit(f"missing Zig download metadata for {version} {platform_key}: {exc}")
+          PY
+          )
 
           curl --fail --location --silent --show-error "$url" --output "$archive"
           rm -rf "$zig_dir"
           mkdir -p "$zig_dir"
           tar -xJf "$archive" -C "$RUNNER_TEMP"
-          mv "$RUNNER_TEMP/zig-linux-${zig_arch}-${ZIG_VERSION}" "$zig_dir"
+          extracted_dir=$(tar -tJf "$archive" | head -n 1 | cut -d/ -f1)
+          mv "$RUNNER_TEMP/$extracted_dir" "$zig_dir"
           echo "$zig_dir" >> "$GITHUB_PATH"
+        env:
+          ZIG_INDEX_JSON: ${{ runner.temp }}/zig-index.json
+          ZIG_VERSION: ${{ env.ZIG_VERSION }}
+          ZIG_PLATFORM_KEY: ${{ startsWith(matrix.rust_target, 'aarch64-') && 'aarch64-linux' || 'x86_64-linux' }}
 
       - name: Install cargo-zigbuild
         if: ${{ matrix.use_zigbuild == 'true' }}
