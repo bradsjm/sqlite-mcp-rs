@@ -118,7 +118,11 @@ impl AppConfig {
     /// ```
     /// use sqlite_mcp_rs::config::AppConfig;
     ///
+    /// # fn main() -> Result<(), sqlite_mcp_rs::errors::AppError> {
     /// let config = AppConfig::from_env()?;
+    /// # let _ = config;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn from_env() -> Result<Self, AppError> {
         Self::from_lookup(|key| std::env::var(key).ok())

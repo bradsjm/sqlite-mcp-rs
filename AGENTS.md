@@ -200,9 +200,17 @@ cargo run --features vector
 
 1. Read relevant modules and identify invariants (limits, policy checks, envelope contracts).
 2. Implement minimal, coherent changes at the right abstraction layer.
-3. Run format, lint, and targeted tests first; then broaden to full suite when possible.
-4. Verify no regression in error mapping or tool response contract.
-5. Keep feature-gated code complete for both enabled and disabled builds.
+3. Run local validation before claiming completion. Baseline validation is mandatory for every code, workflow, packaging, or documentation change unless the user explicitly waives it:
+   - `cargo fmt --all -- --check`
+   - `cargo clippy --all-targets --all-features -- -D warnings`
+   - `cargo test`
+4. Run targeted checks that match the change surface in addition to the baseline. Examples:
+   - doctests for rustdoc changes
+   - npm packaging smoke tests for npm/release changes
+   - `act` dry runs or local Docker smoke tests for workflow and container changes
+5. If any required check cannot be run locally, say so explicitly and explain why. Partial validation is not a substitute for the baseline Rust checks.
+6. Verify no regression in error mapping or tool response contract.
+7. Keep feature-gated code complete for both enabled and disabled builds.
 
 ## High-Risk Areas (Handle Carefully)
 
@@ -214,8 +222,10 @@ cargo run --features vector
 
 ## Done Criteria for Agent Changes
 
-- `cargo fmt --all` passes.
+- `cargo fmt --all -- --check` passes.
 - `cargo clippy --all-targets --all-features -- -D warnings` passes (or scope-constrained equivalent with rationale).
-- Relevant tests pass, including single-test reproductions for touched logic.
+- `cargo test` passes.
+- Relevant targeted tests pass, including doctests, single-test reproductions, packaging smoke tests, and workflow/container validation where applicable.
+- Claims that a release or workflow change is locally validated must be backed by the commands actually run and their outcomes.
 - Public behavior and safety guards remain consistent unless intentionally changed.
 - Documentation/comments are updated only where needed to clarify non-obvious behavior.
