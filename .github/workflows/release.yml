@@ -167,11 +167,22 @@ jobs:
           curl --fail --location --silent --show-error "$url" --output "$archive"
           rm -rf "$zig_dir"
           mkdir -p "$zig_dir"
+          extracted_dir=$(python - <<'PY'
+          import os
+          import tarfile
+
+          archive_path = os.environ["ZIG_ARCHIVE"]
+          with tarfile.open(archive_path, "r:xz") as archive:
+              first_name = archive.getnames()[0]
+
+          print(first_name.split("/", 1)[0])
+          PY
+          )
           tar -xJf "$archive" -C "$RUNNER_TEMP"
-          extracted_dir=$(tar -tJf "$archive" | head -n 1 | cut -d/ -f1)
           mv "$RUNNER_TEMP/$extracted_dir" "$zig_dir"
           echo "$zig_dir" >> "$GITHUB_PATH"
         env:
+          ZIG_ARCHIVE: ${{ runner.temp }}/zig.tar.xz
           ZIG_INDEX_JSON: ${{ runner.temp }}/zig-index.json
           ZIG_VERSION: ${{ env.ZIG_VERSION }}
           ZIG_PLATFORM_KEY: ${{ startsWith(matrix.rust_target, 'aarch64-') && 'aarch64-linux' || 'x86_64-linux' }}
