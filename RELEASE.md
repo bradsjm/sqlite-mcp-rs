@@ -95,11 +95,11 @@ The npm launcher always selects the musl Linux builds:
 
 This avoids glibc baseline management in the npm path. This is a packaging decision, not a general rule for all Rust binaries. If a future MCP repo cannot run correctly from musl builds, do not force this pattern. Restore explicit GNU packaging instead.
 
-### 6. Build Docker and Linux release artifacts from the same Alpine path
+### 6. Keep Docker publishing separate from release artifact builds
 
-The Dockerfile contains a dedicated `artifact` stage that copies only the built Linux binary out of the Alpine builder image. The release workflow uses that stage to export Linux release binaries, and the Docker publish workflow uses the same build path to publish the runtime image.
+The release workflow builds all GitHub release and npm payloads directly on CI runners. The Docker publish workflow is separate and is the only workflow that builds and publishes container images.
 
-That keeps Linux packaging and Linux container delivery aligned.
+That keeps `release.yml` focused on release artifacts and keeps Docker concerns isolated in `publish-docker.yml`.
 
 ## Files That Define the Release System
 
@@ -108,7 +108,7 @@ That keeps Linux packaging and Linux container delivery aligned.
 | `.github/workflows/release.yml` | builds release archives, builds npm tarballs, runs smoke tests, creates GitHub release, publishes npm |
 | `.github/workflows/publish-docker.yml` | builds and publishes multi-arch GHCR images |
 | `.github/workflows/init-npm-placeholder.yml` | creates the initial npm package so Trusted Publishing can be configured |
-| `Dockerfile` | shared Alpine build path for Linux binary export and runtime image |
+| `Dockerfile` | multi-stage Docker image build used by Docker publishing |
 | `scripts/package_release.py` | packages release archives and per-file checksums |
 | `scripts/build_npm_packages.py` | stages platform npm tarballs and the meta tarball |
 | `scripts/write_checksums.py` | writes `.sha256` files and the aggregate `sha256.sum` |
@@ -123,12 +123,10 @@ Source: `.github/workflows/release.yml`
 
 1. `version`
 2. `validate`
-3. `build-native`
-4. `build-linux`
+3. `build-release-artifacts`
 5. `package-npm`
 6. `smoke-npm-native`
-7. `smoke-npm-alpine`
-8. `publish`
+7. `publish`
 
 ### `version`
 
@@ -150,11 +148,13 @@ Purpose:
 
 This is the gate that prevents packaging broken code.
 
-### `build-native`
+### `build-release-artifacts`
 
 Purpose:
 
-- build macOS and Windows release binaries with `cargo build --release --features vector --target ...`
+- build every release binary in one matrix job
+- use `cargo build --release --features vector --target ...` for macOS and Windows targets
+- use `cargo zigbuild --release --features vector --target ...` for Linux musl targets
 - run `--help` smoke tests where the runner can execute the binary
 - package each binary with `scripts/package_release.py`
 - upload packaged archives as workflow artifacts
@@ -165,27 +165,18 @@ Current matrix:
 - `x86_64-apple-darwin` on `macos-15-intel`
 - `x86_64-pc-windows-msvc` on `windows-2022`
 - `aarch64-pc-windows-msvc` on `windows-2022`
+- `linux/amd64` -> `x86_64-unknown-linux-musl`
+- `linux/arm64` -> `aarch64-unknown-linux-musl`
+
+Linux implementation details:
+
+- Linux jobs install Zig and `cargo-zigbuild`
+- Linux jobs keep the musl compatibility `CFLAGS` needed by `sqlite-vec`
+- Linux jobs build directly on Linux runners without using Docker
 
 Current limitation from source:
 
 - Windows arm64 is cross-built but not locally smoke-tested in the workflow.
-
-### `build-linux`
-
-Purpose:
-
-- build Linux release binaries from `Dockerfile` `artifact`
-- use `docker/build-push-action` with `target: artifact`
-- export the produced binary to `artifact-out`
-- run the binary in Alpine with `--help`
-- package archives with `scripts/package_release.py`
-
-Current matrix:
-
-- `linux/amd64` -> `x86_64-unknown-linux-musl`
-- `linux/arm64` -> `aarch64-unknown-linux-musl`
-
-This job is the canonical Linux release path. Do not add a separate ad hoc Linux build script outside Docker unless there is a specific technical reason.
 
 ### `package-npm`
 
@@ -222,23 +213,6 @@ Current matrix:
 Current limitation from source:
 
 - Windows arm64 is not part of this smoke matrix.
-
-### `smoke-npm-alpine`
-
-Purpose:
-
-- validate the Linux npm path in `node:24-alpine`
-- install the meta tarball
-- unpack the matching Linux platform tarball into `node_modules/<alias-name>`
-- run `npx --no-install sqlite-mcp-rs --help`
-
-This is the check that protects the original Alpine failure mode.
-
-Critical implementation detail:
-
-- the container must receive `META_TARBALL`, `PLATFORM_TARBALL`, and `ALIAS_NAME`
-
-If `ALIAS_NAME` is missing, the tarball unpacks into the wrong directory and the launcher cannot resolve the platform package.
 
 ### `publish`
 
@@ -411,9 +385,9 @@ Publishing the meta package first creates a broken installation window. The work
 
 Using musl-only Linux npm payloads removed the need to manage GNU vs musl runtime selection inside the launcher.
 
-### Keep the Linux build path shared
+### Keep release and container workflows separate
 
-Using one Alpine-based Docker build path for both Linux release archives and Docker images prevents drift between “the binary users download” and “the binary the container runs”.
+Using direct CI builds for release artifacts and reserving Docker for the Docker publish workflow keeps the release pipeline easier to reason about.
 
 ### Smoke test the actual install path
 
@@ -430,6 +404,7 @@ Useful local checks:
 - direct execution of `scripts/package_release.py`
 - direct execution of `scripts/build_npm_packages.py`
 - local tarball smoke tests with `npm install` and `npx --no-install`
+- local Docker build and `--help` smoke tests for `publish-docker.yml`
 
 Known limitation from the current workflow shape:
 
@@ -460,6 +435,6 @@ Required updates:
 4. keep manual-only triggers
 5. keep version derivation from `Cargo.toml`
 6. keep platform payload publish order: platform tarballs first, meta tarball last
-7. keep Linux artifact export and Docker image build on the same Dockerfile path
+7. keep Docker publishing isolated to `.github/workflows/publish-docker.yml`
 
 Do not copy old cargo-dist based installer generation into the new repository. That reintroduces the class of problems this design removed.

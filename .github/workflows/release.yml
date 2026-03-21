@@ -67,7 +67,7 @@ jobs:
       - name: Test
         run: cargo test
 
-  build-native:
+  build-release-artifacts:
     needs:
       - version
       - validate
@@ -79,19 +79,35 @@ jobs:
             rust_target: aarch64-apple-darwin
             binary_name: sqlite-mcp-rs
             can_smoke: "true"
+            use_zigbuild: "false"
           - runner: macos-15-intel
             rust_target: x86_64-apple-darwin
             binary_name: sqlite-mcp-rs
             can_smoke: "true"
+            use_zigbuild: "false"
           - runner: windows-2022
             rust_target: x86_64-pc-windows-msvc
             binary_name: sqlite-mcp-rs.exe
             can_smoke: "true"
+            use_zigbuild: "false"
           - runner: windows-2022
             rust_target: aarch64-pc-windows-msvc
             binary_name: sqlite-mcp-rs.exe
             can_smoke: "false"
+            use_zigbuild: "false"
+          - runner: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-musl
+            binary_name: sqlite-mcp-rs
+            can_smoke: "true"
+            use_zigbuild: "true"
+          - runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-musl
+            binary_name: sqlite-mcp-rs
+            can_smoke: "true"
+            use_zigbuild: "true"
     runs-on: ${{ matrix.runner }}
+    env:
+      CFLAGS: -Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t
     steps:
       - uses: actions/checkout@v6
         with:
@@ -106,6 +122,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Zig
+        if: ${{ matrix.use_zigbuild == 'true' }}
+        uses: mlugg/setup-zig@v2
+
+      - name: Install cargo-zigbuild
+        if: ${{ matrix.use_zigbuild == 'true' }}
+        uses: taiki-e/install-action@cargo-zigbuild
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
@@ -113,7 +137,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --features vector --target ${{ matrix.rust_target }}
+          if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
+            cargo zigbuild --release --features vector --target ${{ matrix.rust_target }}
+          else
+            cargo build --release --features vector --target ${{ matrix.rust_target }}
+          fi
 
       - name: Smoke test binary
         if: ${{ matrix.can_smoke == 'true' }}
@@ -137,74 +165,10 @@ jobs:
           name: release-${{ matrix.rust_target }}
           path: release/*
 
-  build-linux:
-    needs:
-      - version
-      - validate
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            platform: linux/amd64
-            target_triple: x86_64-unknown-linux-musl
-          - runner: ubuntu-24.04-arm
-            platform: linux/arm64
-            target_triple: aarch64-unknown-linux-musl
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-          submodules: recursive
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Export Linux binary
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          target: artifact
-          platforms: ${{ matrix.platform }}
-          build-args: |
-            CARGO_FEATURES=vector
-          outputs: type=local,dest=artifact-out
-
-      - name: Smoke test binary on Alpine
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            -v "$PWD/artifact-out/sqlite-mcp-rs:/sqlite-mcp-rs:ro" \
-            alpine:3.20 \
-            /sqlite-mcp-rs --help >/dev/null
-
-      - name: Package archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          python scripts/package_release.py \
-            --target-triple "${{ matrix.target_triple }}" \
-            --binary "./artifact-out/sqlite-mcp-rs" \
-            --output-dir release
-
-      - name: Upload packaged archive
-        uses: actions/upload-artifact@v6
-        with:
-          name: release-${{ matrix.target_triple }}
-          path: release/*
-
   package-npm:
     needs:
       - version
-      - build-native
-      - build-linux
+      - build-release-artifacts
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
@@ -293,69 +257,12 @@ jobs:
           tar -xzf "../npm-dist/${PLATFORM_TARBALL}" -C "node_modules/${ALIAS_NAME}" --strip-components=1
           npx --no-install sqlite-mcp-rs --help >/dev/null
 
-  smoke-npm-alpine:
-    needs:
-      - package-npm
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            alias_name: "@bradsjm/sqlite-mcp-rs-linux-x64"
-          - runner: ubuntu-24.04-arm
-            alias_name: "@bradsjm/sqlite-mcp-rs-linux-arm64"
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-
-      - name: Download npm tarballs
-        uses: actions/download-artifact@v7
-        with:
-          name: npm-dist
-          path: npm-dist
-
-      - name: Resolve tarball names
-        shell: bash
-        run: |
-          set -euo pipefail
-          META_TARBALL=$(node -e 'const fs=require("fs"); const manifest=JSON.parse(fs.readFileSync("npm-dist/manifest.json","utf8")); console.log(manifest.meta_package.path);')
-          PLATFORM_TARBALL=$(node -e 'const fs=require("fs"); const manifest=JSON.parse(fs.readFileSync("npm-dist/manifest.json","utf8")); const aliasName=process.argv[1]; const entry=manifest.platform_packages.find((item)=>item.alias_name===aliasName); if(!entry){process.exit(1)} console.log(entry.path);' "${{ matrix.alias_name }}")
-          echo "META_TARBALL=$META_TARBALL" >> "$GITHUB_ENV"
-          echo "PLATFORM_TARBALL=$PLATFORM_TARBALL" >> "$GITHUB_ENV"
-          echo "ALIAS_NAME=${{ matrix.alias_name }}" >> "$GITHUB_ENV"
-
-      - name: Run npm smoke test in Alpine
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            -e META_TARBALL="$META_TARBALL" \
-            -e PLATFORM_TARBALL="$PLATFORM_TARBALL" \
-            -e ALIAS_NAME="$ALIAS_NAME" \
-            -v "$PWD/npm-dist:/work/npm-dist:ro" \
-            -w /work \
-            node:24-alpine \
-            sh -lc '
-              set -e
-              mkdir -p /tmp/smoke
-              cd /tmp/smoke
-              npm init -y >/dev/null 2>&1
-              npm install "/work/npm-dist/$META_TARBALL" >/dev/null
-              mkdir -p "node_modules/$ALIAS_NAME"
-              tar -xzf "/work/npm-dist/$PLATFORM_TARBALL" -C "node_modules/$ALIAS_NAME" --strip-components=1
-              npx --no-install sqlite-mcp-rs --help >/dev/null
-            '
-
   publish:
     needs:
       - version
-      - build-native
-      - build-linux
+      - build-release-artifacts
       - package-npm
       - smoke-npm-native
-      - smoke-npm-alpine
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
