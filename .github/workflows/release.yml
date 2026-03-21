@@ -9,6 +9,7 @@ permissions:
 
 env:
   APP_NAME: sqlite-mcp-rs
+  ZIG_VERSION: 0.15.2
 
 jobs:
   version:
@@ -118,15 +119,35 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - name: Set up Zig
+      - name: Install Zig
         if: ${{ matrix.use_zigbuild == 'true' }}
-        uses: mlugg/setup-zig@v2
-        with:
-          version: latest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$(uname -m)" in
+            x86_64) zig_arch="x86_64" ;;
+            aarch64|arm64) zig_arch="aarch64" ;;
+            *)
+              echo "Unsupported runner architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+
+          zig_dir="$RUNNER_TEMP/zig-${ZIG_VERSION}-${zig_arch}-linux"
+          archive="$RUNNER_TEMP/zig.tar.xz"
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${zig_arch}-${ZIG_VERSION}.tar.xz"
+
+          curl --fail --location --silent --show-error "$url" --output "$archive"
+          rm -rf "$zig_dir"
+          mkdir -p "$zig_dir"
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          mv "$RUNNER_TEMP/zig-linux-${zig_arch}-${ZIG_VERSION}" "$zig_dir"
+          echo "$zig_dir" >> "$GITHUB_PATH"
 
       - name: Install cargo-zigbuild
         if: ${{ matrix.use_zigbuild == 'true' }}
@@ -274,7 +295,7 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
