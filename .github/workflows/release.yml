@@ -166,7 +166,6 @@ jobs:
 
           curl --fail --location --silent --show-error "$url" --output "$archive"
           rm -rf "$zig_dir"
-          mkdir -p "$zig_dir"
           extracted_dir=$(python - <<'PY'
           import os
           import tarfile
@@ -181,6 +180,7 @@ jobs:
           tar -xJf "$archive" -C "$RUNNER_TEMP"
           mv "$RUNNER_TEMP/$extracted_dir" "$zig_dir"
           echo "$zig_dir" >> "$GITHUB_PATH"
+          "$zig_dir/zig" version
         env:
           ZIG_ARCHIVE: ${{ runner.temp }}/zig.tar.xz
           ZIG_INDEX_JSON: ${{ runner.temp }}/zig-index.json
