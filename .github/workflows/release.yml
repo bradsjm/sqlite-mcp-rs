@@ -387,16 +387,6 @@ jobs:
           - linux/arm64 (glibc runtime with local embeddings)
           EOF
 
-      - name: Create GitHub release
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh release create "${{ needs.version.outputs.tag }}" \
-            --target "${{ github.sha }}" \
-            --title "${{ needs.version.outputs.tag }}" \
-            --notes-file release-notes.md \
-            release/*
-
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -410,12 +400,49 @@ jobs:
           const fs = require("fs");
           const { spawnSync } = require("child_process");
           const manifest = JSON.parse(fs.readFileSync("npm-dist/manifest.json", "utf8"));
-          const tarballs = [
-            ...manifest.platform_packages.map((entry) => entry.path),
-            manifest.meta_package.path,
+          const packages = [
+            ...manifest.platform_packages.map((entry) => ({
+              name: "@bradsjm/sqlite-mcp-rs",
+              version: "${{ needs.version.outputs.version }}-" + entry.platform,
+              tarball: entry.path,
+            })),
+            {
+              name: manifest.meta_package.name,
+              version: "${{ needs.version.outputs.version }}",
+              tarball: manifest.meta_package.path,
+            },
           ];
-          for (const tarball of tarballs) {
-            const result = spawnSync("npm", ["publish", "--access", "public", "--provenance", "--tag", "latest", `./npm-dist/${tarball}`], {
+
+          function packageVersionExists(name, version) {
+            const packageSpec = `${name}@${version}`;
+            const result = spawnSync("npm", ["view", packageSpec, "version", "--json"], {
+              encoding: "utf8",
+            });
+
+            if (result.status === 0) {
+              return true;
+            }
+
+            const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+            if (
+              output.includes("E404") ||
+              output.includes("404 Not Found") ||
+              output.includes("No match found for version")
+            ) {
+              return false;
+            }
+
+            process.stderr.write(output);
+            throw new Error(`failed to check whether ${packageSpec} already exists on npm`);
+          }
+
+          for (const pkg of packages) {
+            if (packageVersionExists(pkg.name, pkg.version)) {
+              console.log(`Skipping already published npm package ${pkg.name}@${pkg.version}`);
+              continue;
+            }
+
+            const result = spawnSync("npm", ["publish", "--access", "public", "--provenance", "--tag", "latest", `./npm-dist/${pkg.tarball}`], {
               stdio: "inherit",
             });
             if (result.status !== 0) {
@@ -423,3 +450,13 @@ jobs:
             }
           }
           NODE
+
+      - name: Create GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${{ needs.version.outputs.tag }}" \
+            --target "${{ github.sha }}" \
+            --title "${{ needs.version.outputs.tag }}" \
+            --notes-file release-notes.md \
+            release/*

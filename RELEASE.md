@@ -225,15 +225,18 @@ Purpose:
 - write unified release checksums with `scripts/write_checksums.py`
 - verify all expected release files exist
 - write release notes
-- create the GitHub release with `gh release create`
 - publish npm tarballs
+- create the GitHub release with `gh release create`
 
 Publish order is intentional:
 
 1. publish all platform tarballs first
 2. publish the meta tarball last
+3. create the GitHub release after npm publishing succeeds
 
 The meta package should not be visible before its platform variants exist, otherwise npm installs can resolve an incomplete release.
+
+The npm publish step is also rerunnable. Before each `npm publish`, the workflow checks whether that exact package version already exists and skips it if it does. This allows a rerun to continue past previously published platform tarballs after a partial npm failure.
 
 ## Docker Publish Workflow
 
