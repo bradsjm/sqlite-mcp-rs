@@ -227,6 +227,8 @@ run_tests() {
     and ($names | index("db_import") != null)
     and ($names | index("queue_push") != null)
     and ($names | index("queue_wait") != null)
+    and ([.. | objects | select(.type? == "array" and (has("items") | not))] | length == 0)
+    and ([.. | .format? | select(type == "string" and (. == "int64" or . == "uint64" or . == "double"))] | length == 0)
   '
 
   has_vector_tools=$(printf '%s\n' "$tools_json" | jq -r '

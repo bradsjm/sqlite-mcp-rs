@@ -18,6 +18,7 @@ pub struct QueuePushRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct QueuePushData {
     pub queue: String,
+    #[schemars(schema_with = "crate::contracts::schema::nonnegative_i64_schema")]
     pub id: i64,
     pub created_at: String,
     pub visible_at: String,
@@ -29,10 +30,13 @@ pub struct QueueWaitRequest {
     pub db_id: Option<String>,
     pub queue: String,
     #[serde(default)]
+    #[schemars(schema_with = "crate::contracts::schema::nonnegative_i64_schema")]
     pub after_id: Option<i64>,
     #[serde(default)]
+    #[schemars(schema_with = "crate::contracts::schema::u64_schema")]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
+    #[schemars(schema_with = "crate::contracts::schema::u64_schema")]
     pub poll_interval_ms: Option<u64>,
     #[serde(default)]
     pub include_existing: bool,
@@ -58,6 +62,7 @@ pub struct QueueWaitData {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct QueueJobSlot {
     #[serde(default)]
+    #[schemars(schema_with = "crate::contracts::schema::nonnegative_i64_schema")]
     pub id: Option<i64>,
     #[serde(default)]
     pub payload: Option<Value>,

@@ -141,8 +141,10 @@ pub struct VectorSearchRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct VectorMatch {
     pub id: String,
+    #[schemars(schema_with = "crate::contracts::schema::number_schema")]
     pub distance: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::contracts::schema::number_schema")]
     pub score: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,

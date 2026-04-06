@@ -195,6 +195,8 @@ run_tests() {
     and ($names | index("sql_execute") != null)
     and ($names | index("sql_batch") != null)
     and ($names | index("db_import") != null)
+    and ([.. | objects | select(.type? == "array" and (has("items") | not))] | length == 0)
+    and ([.. | .format? | select(type == "string" and (. == "int64" or . == "uint64" or . == "double"))] | length == 0)
   '
 
   has_vector_tools=$(printf '%s\n' "$tools_json" | jq -r '

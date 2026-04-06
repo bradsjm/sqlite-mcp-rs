@@ -80,7 +80,8 @@ pub struct SqlExecuteData {
     #[schemars(schema_with = "crate::contracts::schema::u64_schema")]
     pub rows_affected: u64,
     /// Row ID of the last inserted row (for INSERT statements).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::contracts::schema::i64_schema")]
     pub last_insert_rowid: Option<i64>,
 }
 
@@ -142,7 +143,8 @@ pub struct SqlBatchResult {
     #[schemars(schema_with = "crate::contracts::schema::u64_schema")]
     pub rows_affected: u64,
     /// Row ID of last inserted row (for INSERT).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::contracts::schema::i64_schema")]
     pub last_insert_rowid: Option<i64>,
 }
 
