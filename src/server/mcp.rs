@@ -980,13 +980,8 @@ impl SqliteMcpServer {
 #[tool_handler]
 impl ServerHandler for SqliteMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "sqlite-mcp-rs executes bounded SQLite operations through typed MCP tools."
-                    .to_string(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "sqlite-mcp-rs executes bounded SQLite operations through typed MCP tools.",
+        )
     }
 }
