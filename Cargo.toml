@@ -32,7 +32,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 uuid = { version = "1.23.0", features = ["v4", "serde"] }
 fastembed = { version = "5.13.1", optional = true, default-features = false, features = ["hf-hub-rustls-tls", "ort-load-dynamic"] }
 sqlite-vec = { version = "0.1.9", optional = true }
-reqwest = { version = "0.13.2", optional = true, default-features = false, features = ["blocking", "rustls"] }
+reqwest = { version = "0.13.2", optional = true, default-features = false, features = ["blocking", "native-tls"] }
 flate2 = { version = "1.1.9", optional = true }
 tar = { version = "0.4.45", optional = true }
 zip = { version = "8.5.1", optional = true, default-features = false, features = ["deflate"] }
