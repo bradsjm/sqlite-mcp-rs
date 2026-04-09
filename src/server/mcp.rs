@@ -985,3 +985,189 @@ impl ServerHandler for SqliteMcpServer {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rmcp::model::Tool;
+    use serde_json::Map;
+    use serde_json::Value;
+
+    use super::SqliteMcpServer;
+
+    fn tool_by_name(name: &str) -> Tool {
+        SqliteMcpServer::tool_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("tool {name} not found"))
+    }
+
+    fn output_schema_for(name: &str) -> Value {
+        let tool = tool_by_name(name);
+        Value::Object(
+            tool.output_schema
+                .unwrap_or_else(|| panic!("tool {name} is missing output schema"))
+                .as_ref()
+                .clone(),
+        )
+    }
+
+    fn resolve_schema_node<'a>(root: &'a Value, mut node: &'a Value) -> &'a Value {
+        loop {
+            if let Some(reference) = node.get("$ref").and_then(Value::as_str) {
+                node = root
+                    .pointer(reference.trim_start_matches('#'))
+                    .unwrap_or_else(|| panic!("missing schema ref {reference}"));
+                continue;
+            }
+
+            if let Some(items) = node.get("allOf").and_then(Value::as_array)
+                && items.len() == 1
+            {
+                node = &items[0];
+                continue;
+            }
+
+            return node;
+        }
+    }
+
+    fn property_schema<'a>(root: &'a Value, node: &'a Value, property: &str) -> &'a Value {
+        resolve_schema_node(root, node)
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get(property))
+            .map(|value| resolve_schema_node(root, value))
+            .unwrap_or_else(|| panic!("missing property schema for {property}"))
+    }
+
+    fn object_properties<'a>(root: &'a Value, node: &'a Value) -> &'a Map<String, Value> {
+        property_map(root, node)
+    }
+
+    fn property_map<'a>(root: &'a Value, node: &'a Value) -> &'a Map<String, Value> {
+        resolve_schema_node(root, node)
+            .get("properties")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("schema node is missing properties"))
+    }
+
+    fn assert_tool_envelope_schema(name: &str) -> Value {
+        let schema = output_schema_for(name);
+        let root = resolve_schema_node(&schema, &schema);
+        let summary = property_schema(&schema, root, "summary");
+        let data = property_schema(&schema, root, "data");
+        let hints = property_schema(&schema, root, "hints");
+        let meta = property_schema(&schema, root, "_meta");
+
+        assert_eq!(root.get("type"), Some(&Value::String("object".to_string())));
+        assert_eq!(
+            summary.get("type"),
+            Some(&Value::String("string".to_string()))
+        );
+        assert_eq!(data.get("type"), Some(&Value::String("object".to_string())));
+        assert_eq!(hints.get("type"), Some(&Value::String("array".to_string())));
+        assert!(hints.get("items").is_some());
+        assert_eq!(meta.get("type"), Some(&Value::String("object".to_string())));
+        assert_eq!(
+            property_schema(&schema, meta, "now_utc").get("type"),
+            Some(&Value::String("string".to_string()))
+        );
+        let meta_properties = object_properties(&schema, meta);
+        assert!(!meta_properties.contains_key("elapsed_ms"));
+        assert!(!meta_properties.contains_key("request_id"));
+        assert!(!meta_properties.contains_key("truncated"));
+        assert!(!meta_properties.contains_key("next_cursor"));
+        schema
+    }
+
+    #[test]
+    fn all_tools_publish_object_output_schemas() {
+        let tools = SqliteMcpServer::tool_router().list_all();
+        assert!(!tools.is_empty(), "tool router should publish tools");
+
+        for tool in tools {
+            let schema = Value::Object(
+                tool.output_schema
+                    .unwrap_or_else(|| panic!("tool {} is missing output schema", tool.name))
+                    .as_ref()
+                    .clone(),
+            );
+            assert_eq!(
+                schema.pointer("/type"),
+                Some(&Value::String("object".to_string())),
+                "tool {} should publish an object-root output schema",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn db_open_output_schema_matches_envelope_and_payload() {
+        let schema = assert_tool_envelope_schema("db_open");
+        let data = property_schema(&schema, &schema, "data");
+        assert_eq!(
+            property_schema(&schema, data, "db_id").get("type"),
+            Some(&Value::String("string".to_string()))
+        );
+        assert_eq!(
+            property_schema(&schema, data, "active").get("type"),
+            Some(&Value::String("boolean".to_string()))
+        );
+        let extensions_loaded = property_schema(&schema, data, "extensions_loaded");
+        assert!(object_properties(&schema, extensions_loaded).contains_key("vec"));
+    }
+
+    #[test]
+    fn sql_execute_output_schema_matches_envelope_and_payload() {
+        let schema = assert_tool_envelope_schema("sql_execute");
+        let data = property_schema(&schema, &schema, "data");
+        assert_eq!(
+            property_schema(&schema, data, "rows_affected").get("type"),
+            Some(&Value::String("integer".to_string()))
+        );
+        assert_eq!(
+            property_schema(&schema, data, "last_insert_rowid").get("type"),
+            Some(&Value::String("integer".to_string()))
+        );
+        assert_eq!(
+            data.get("required"),
+            Some(&Value::from(vec!["rows_affected"]))
+        );
+    }
+
+    #[test]
+    fn queue_wait_output_schema_matches_envelope_and_payload() {
+        let schema = assert_tool_envelope_schema("queue_wait");
+        let data = property_schema(&schema, &schema, "data");
+        assert_eq!(
+            property_schema(&schema, data, "queue").get("type"),
+            Some(&Value::String("string".to_string()))
+        );
+        assert_eq!(
+            property_schema(&schema, data, "timed_out").get("type"),
+            Some(&Value::String("boolean".to_string()))
+        );
+        let job = property_schema(&schema, data, "job");
+        assert!(object_properties(&schema, job).contains_key("id"));
+    }
+
+    #[cfg(feature = "vector")]
+    #[test]
+    fn vector_search_output_schema_matches_envelope_and_payload() {
+        let schema = assert_tool_envelope_schema("vector_search");
+        let data = property_schema(&schema, &schema, "data");
+        let matches = property_schema(&schema, data, "matches");
+        let match_items =
+            resolve_schema_node(&schema, matches.get("items").expect("matches items"));
+        assert_eq!(
+            matches.get("type"),
+            Some(&Value::String("array".to_string()))
+        );
+        assert_eq!(
+            property_schema(&schema, data, "issues").get("type"),
+            Some(&Value::String("array".to_string()))
+        );
+        assert!(object_properties(&schema, match_items).contains_key("distance"));
+    }
+}
