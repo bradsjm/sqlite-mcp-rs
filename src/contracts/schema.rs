@@ -102,6 +102,21 @@ pub fn nonnegative_i64_schema(_: &mut SchemaGenerator) -> Schema {
     })
 }
 
+pub fn optional_nonnegative_i64_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "anyOf": [
+            {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": JSON_SAFE_INTEGER_MAX
+            },
+            {
+                "type": "null"
+            }
+        ]
+    })
+}
+
 pub fn i64_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({
         "type": "integer",
@@ -203,6 +218,17 @@ mod tests {
 
         assert_schema_is_mcp_compatible::<QueuePushData>();
         assert_schema_is_mcp_compatible::<QueueJobSlot>();
+
+        let queue_job_slot_schema =
+            serde_json::to_value(schema_for!(QueueJobSlot)).expect("schema must serialize");
+        assert_eq!(
+            queue_job_slot_schema.pointer("/properties/id/anyOf/0/minimum"),
+            Some(&Value::from(0))
+        );
+        assert_eq!(
+            queue_job_slot_schema.pointer("/properties/id/anyOf/1/type"),
+            Some(&Value::from("null"))
+        );
     }
 
     #[cfg(feature = "vector")]

@@ -1149,7 +1149,16 @@ mod tests {
             Some(&Value::String("boolean".to_string()))
         );
         let job = property_schema(&schema, data, "job");
+        let job_id = property_schema(&schema, job, "id");
         assert!(object_properties(&schema, job).contains_key("id"));
+        assert_eq!(
+            job_id.pointer("/anyOf/0/type"),
+            Some(&Value::String("integer".to_string()))
+        );
+        assert_eq!(
+            job_id.pointer("/anyOf/1/type"),
+            Some(&Value::String("null".to_string()))
+        );
     }
 
     #[cfg(feature = "vector")]

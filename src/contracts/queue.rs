@@ -62,7 +62,7 @@ pub struct QueueWaitData {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct QueueJobSlot {
     #[serde(default)]
-    #[schemars(schema_with = "crate::contracts::schema::nonnegative_i64_schema")]
+    #[schemars(schema_with = "crate::contracts::schema::optional_nonnegative_i64_schema")]
     pub id: Option<i64>,
     #[serde(default)]
     pub payload: Option<Value>,
