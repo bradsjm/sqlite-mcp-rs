@@ -463,6 +463,7 @@ run_tests() {
   '
 
   echo "Checking concurrent queue_wait + queue_push over HTTP"
+  local async_queue="http_queue_async_${RANDOM}_$$"
   local wait_result_file
   wait_result_file="$REPO_ROOT/.tmp/queue-wait-http-result.json"
   rm -f "$wait_result_file"
@@ -472,7 +473,8 @@ run_tests() {
       --method tools/call \
       --tool-name queue_wait \
       --tool-arg "db_id=${active_db_id}" \
-      --tool-arg queue=http_queue_async \
+      --tool-arg "queue=${async_queue}" \
+      --tool-arg include_existing=true \
       --tool-arg timeout_ms=5000 \
       --tool-arg poll_interval_ms=100 >"$wait_result_file"
   ) &
@@ -485,7 +487,7 @@ run_tests() {
     --method tools/call \
     --tool-name queue_push \
     --tool-arg "db_id=${active_db_id}" \
-    --tool-arg queue=http_queue_async \
+    --tool-arg "queue=${async_queue}" \
     --tool-arg 'payload={"kind":"async_http_job"}' \
     --tool-arg 'metadata={"source":"http_test"}')
 
