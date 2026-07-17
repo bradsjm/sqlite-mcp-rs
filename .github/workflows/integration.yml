@@ -72,6 +72,44 @@ jobs:
       - name: Run tests
         run: cargo test --locked ${{ matrix.cargo-arguments }}
 
+  npm-packaging:
+    name: NPM packaging (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - "16"
+          - "24"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Test npm launcher
+        run: node scripts/test-npm-launcher.js
+
+      - name: Install Python
+        if: ${{ matrix.node-version == '24' }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned npm
+        if: ${{ matrix.node-version == '24' }}
+        run: npm install --global npm@12.0.1
+
+      - name: Test npm package generation
+        if: ${{ matrix.node-version == '24' }}
+        run: python scripts/test_build_npm_packages.py
+
   mcp-integration:
     name: MCP integration (${{ matrix.configuration }})
     runs-on: ubuntu-24.04

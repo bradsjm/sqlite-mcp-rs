@@ -6,7 +6,8 @@
     "sqlite-mcp-rs": "bin/sqlite-mcp-rs.js"
   },
   "files": [
-    "bin"
+    "bin",
+    "lib"
   ],
   "engines": {
     "node": ">=16"

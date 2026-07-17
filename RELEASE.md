@@ -10,7 +10,7 @@ The current release design is optimized for these requirements:
 - one source of truth for the release version: `[package].version` in `Cargo.toml`
 - one user-facing npm package name
 - native binaries for macOS, Windows, and Linux
-- Linux npm support without a glibc/musl split in the installer
+- explicit GNU and musl Linux npm payloads selected by runtime libc
 - Linux container images for `amd64` and `arm64`
 - simple packaging logic that is checked into the repository and debuggable without generated installer code
 
@@ -18,13 +18,15 @@ The current release design is optimized for these requirements:
 
 Release workflow binaries:
 
-| Platform | Rust target | Delivery |
-| --- | --- | --- |
-| macOS Apple Silicon | `aarch64-apple-darwin` | GitHub release archive, npm |
-| macOS Intel | `x86_64-apple-darwin` | GitHub release archive, npm |
-| Windows x64 | `x86_64-pc-windows-msvc` | GitHub release archive, npm |
-| Linux x64 | `x86_64-unknown-linux-musl` | GitHub release archive, npm, Docker |
-| Linux arm64 | `aarch64-unknown-linux-musl` | GitHub release archive, npm, Docker |
+| Platform | Rust target | Delivery | Features |
+| --- | --- | --- | --- |
+| macOS Apple Silicon | `aarch64-apple-darwin` | GitHub release archive, npm | `vector local-embeddings` |
+| macOS Intel | `x86_64-apple-darwin` | GitHub release archive, npm | `vector local-embeddings` |
+| Windows x64 | `x86_64-pc-windows-msvc` | GitHub release archive, npm | `vector local-embeddings` |
+| Linux GNU x64 | `x86_64-unknown-linux-gnu` | GitHub release archive, npm | `vector local-embeddings` |
+| Linux GNU arm64 | `aarch64-unknown-linux-gnu` | GitHub release archive, npm | `vector local-embeddings` |
+| Linux musl x64 | `x86_64-unknown-linux-musl` | GitHub release archive, npm | `vector` |
+| Linux musl arm64 | `aarch64-unknown-linux-musl` | GitHub release archive, npm | `vector` |
 
 Docker workflow images:
 
@@ -64,6 +66,7 @@ This repository does not rely on generated npm or shell installers. Packaging be
 - `scripts/write_checksums.py`
 - `npm/meta/package.json`
 - `npm/meta/bin/sqlite-mcp-rs.js`
+- `npm/meta/lib/platform.js`
 
 ### 4. Publish one real npm package name
 
@@ -71,7 +74,7 @@ The npm release model uses:
 
 - one real package name: `@bradsjm/sqlite-mcp-rs`
 - one meta package at version `X.Y.Z`
-- several platform payload packages published under the same real package name with platform-suffixed versions such as `X.Y.Z-linux-x64`
+- seven platform payload packages published under the same real package name with platform-suffixed versions such as `X.Y.Z-linux-x64-gnu`
 - `optionalDependencies` aliases in the meta package that map friendly alias names back to the real package and version
 
 In this repository the alias names are:
@@ -79,25 +82,25 @@ In this repository the alias names are:
 - `@bradsjm/sqlite-mcp-rs-darwin-x64`
 - `@bradsjm/sqlite-mcp-rs-darwin-arm64`
 - `@bradsjm/sqlite-mcp-rs-win32-x64`
-- `@bradsjm/sqlite-mcp-rs-linux-x64`
-- `@bradsjm/sqlite-mcp-rs-linux-arm64`
+- `@bradsjm/sqlite-mcp-rs-linux-x64-gnu`
+- `@bradsjm/sqlite-mcp-rs-linux-arm64-gnu`
+- `@bradsjm/sqlite-mcp-rs-linux-x64-musl`
+- `@bradsjm/sqlite-mcp-rs-linux-arm64-musl`
 
 These alias names are not independent packages that need separate npm initialization.
 
-### 5. Keep Linux npm packages musl-only
+### 5. Select Linux payloads by libc
 
-The npm launcher always selects the musl Linux builds:
+Linux payloads declare npm `os`, `cpu`, and `libc` metadata. The launcher independently detects libc from the Node.js diagnostic report, validates the installed payload metadata, and selects:
 
-- `x86_64-unknown-linux-musl`
-- `aarch64-unknown-linux-musl`
+- GNU x64: `x86_64-unknown-linux-gnu`
+- GNU arm64: `aarch64-unknown-linux-gnu`
+- musl x64: `x86_64-unknown-linux-musl`
+- musl arm64: `aarch64-unknown-linux-musl`
 
-This avoids glibc baseline management in the npm path. This is a packaging decision, not a general rule for all Rust binaries. If a future MCP repo cannot run correctly from musl builds, do not force this pattern. Restore explicit GNU packaging instead.
+GNU artifacts are built with `vector local-embeddings` against an explicit glibc 2.28 floor. Musl artifacts retain the `vector`-only feature set. Detection fails closed if diagnostic reports are unavailable, ambiguous, or contain no recognized libc marker; the launcher never falls back across libc families.
 
-Current repository nuance:
-
-- Linux musl release and npm artifacts build with `vector` only.
-- Local embedding/reranking support (`local-embeddings`) is intentionally excluded from musl artifacts.
-- Docker images use a glibc runtime and build with `vector local-embeddings`.
+Docker images remain separate glibc artifacts built with `vector local-embeddings`.
 
 ### 6. Keep Docker publishing separate from release artifact builds
 
@@ -115,9 +118,13 @@ That keeps `release.yml` focused on release artifacts and keeps Docker concerns 
 | `Dockerfile` | multi-stage Docker image build used by Docker publishing |
 | `scripts/package_release.py` | packages release archives and per-file checksums |
 | `scripts/build_npm_packages.py` | stages platform npm tarballs and the meta tarball |
+| `scripts/run-sqlite-mcp-glibc-baseline.sh` | runs release binaries in Rocky Linux 8 for glibc-floor integration tests |
+| `scripts/test_build_npm_packages.py` | validates generated manifests and npm libc install filtering |
+| `scripts/test-npm-launcher.js` | validates runtime platform/libc selection and payload metadata checks |
 | `scripts/write_checksums.py` | writes `.sha256` files and the aggregate `sha256.sum` |
 | `npm/meta/package.json` | base metadata for the npm meta package |
 | `npm/meta/bin/sqlite-mcp-rs.js` | runtime launcher that resolves the installed platform payload |
+| `npm/meta/lib/platform.js` | detects libc, resolves targets, and validates payload package metadata |
 
 ## Release Workflow
 
@@ -129,7 +136,7 @@ Source: `.github/workflows/release.yml`
 2. `validate`
 3. `build-release-artifacts`
 4. `package-npm`
-5. `smoke-npm-native`
+5. `smoke-npm-native`, `smoke-npm-musl`, and `smoke-gnu-model`
 6. `publish`
 
 ### `version`
@@ -146,9 +153,11 @@ This job must remain small and deterministic because every publish step depends 
 
 Purpose:
 
+- `node scripts/test-npm-launcher.js`
+- `python scripts/test_build_npm_packages.py` with Node 24 and npm 12.0.1
 - `cargo fmt --all -- --check`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test`
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`
+- default, vector, and all-feature `cargo test --locked` runs
 
 This is the gate that prevents packaging broken code.
 
@@ -157,9 +166,10 @@ This is the gate that prevents packaging broken code.
 Purpose:
 
 - build every release binary in one matrix job
-- use `cargo build --release --features "vector local-embeddings" --target ...` for macOS and Windows targets
-- use `cargo zigbuild --release --features vector --target ...` for Linux musl targets
-- run `--help` smoke tests where the runner can execute the binary
+- use `cargo build --locked --release --features "vector local-embeddings" --target ...` for macOS and Windows targets
+- use `cargo zigbuild --locked --release` for Linux targets
+- run direct `--help` smoke tests on matching-architecture runners
+- run every GNU binary in Rocky Linux 8 before packaging
 - package each binary with `scripts/package_release.py`
 - upload packaged archives as workflow artifacts
 
@@ -168,14 +178,17 @@ Current matrix:
 - `aarch64-apple-darwin` on `macos-15`
 - `x86_64-apple-darwin` on `macos-15-intel`
 - `x86_64-pc-windows-msvc` on `windows-2022`
-- `linux/amd64` -> `x86_64-unknown-linux-musl`
-- `linux/arm64` -> `aarch64-unknown-linux-musl`
+- `x86_64-unknown-linux-gnu.2.28` on `ubuntu-24.04`
+- `aarch64-unknown-linux-gnu.2.28` on `ubuntu-24.04-arm`
+- `x86_64-unknown-linux-musl` on `ubuntu-24.04`
+- `aarch64-unknown-linux-musl` on `ubuntu-24.04-arm`
 
 Linux implementation details:
 
-- Linux jobs install Zig and `cargo-zigbuild`
-- Linux jobs keep the musl compatibility `CFLAGS` needed by `sqlite-vec`
-- Linux jobs build directly on Linux runners without using Docker
+- Linux jobs install Zig and `cargo-zigbuild`.
+- Archive names and Cargo output paths use canonical Rust triples without the `.2.28` build suffix.
+- GNU artifacts use `vector local-embeddings`; musl artifacts use `vector`.
+- Linux jobs keep the compatibility `CFLAGS` needed by `sqlite-vec`.
 
 Current limitation from source:
 
@@ -195,27 +208,15 @@ Important design detail:
 
 That keeps npm and GitHub release payloads consistent.
 
-### `smoke-npm-native`
+### Npm smoke gates
 
-Purpose:
+`smoke-npm-native` installs the meta tarball, manually extracts the matching payload, and runs `npx --no-install sqlite-mcp-rs --help` on macOS arm64/x64, Windows x64, and GNU Linux arm64/x64. Linux rows install both same-CPU libc payloads and assert the real runtime selects GNU.
 
-- install the meta tarball with `npm install`
-- unpack the matching platform tarball into `node_modules/<alias-name>`
-- run `npx --no-install sqlite-mcp-rs --help`
+`smoke-npm-musl` repeats the Linux install with both payloads inside matching-architecture `node:24-alpine` containers and asserts the runtime selects musl.
 
-This validates the launcher logic in `npm/meta/bin/sqlite-mcp-rs.js`.
+`smoke-gnu-model` extracts the exact GNU npm payload on both Linux architectures and runs the existing local-model inspector suite through Rocky Linux 8. Publication remains blocked until ONNX Runtime, embeddings, similarity search, and reranking succeed at the glibc floor.
 
-Current matrix:
-
-- macOS arm64
-- macOS x64
-- Windows x64
-- Linux x64
-- Linux arm64
-
-Current limitation from source:
-
-- Windows arm64 is not part of this smoke matrix.
+Windows arm64 is not part of the release or smoke matrix.
 
 ### `publish`
 
@@ -328,6 +329,7 @@ Important behavior:
 
 - platform tarballs use the real npm package name and platform-suffixed versions
 - the meta tarball writes `optionalDependencies` aliases that point back to the real package name
+- Linux platform manifests include the npm `libc` array; Darwin and Windows manifests omit it
 
 If another repo copies this pattern, update:
 
@@ -349,26 +351,32 @@ The `publish` job uses this after all archives have been collected into `release
 
 ## NPM Launcher Contract
 
-Source: `npm/meta/bin/sqlite-mcp-rs.js`
+Sources:
+
+- `npm/meta/lib/platform.js`
+- `npm/meta/bin/sqlite-mcp-rs.js`
 
 The launcher:
 
-1. maps `process.platform` and `process.arch` to a Rust target triple
+1. maps `process.platform`, `process.arch`, and Linux libc to a Rust target triple
 2. maps that target triple to an alias package name
 3. resolves `<alias>/package.json`
-4. runs the vendored binary from `vendor/<target-triple>/`
+4. validates the installed package `os`, `cpu`, and Linux `libc` metadata
+5. runs the vendored binary from `vendor/<target-triple>/`
 
 Supported runtime mappings:
 
 | Runtime | Target triple | Alias package |
 | --- | --- | --- |
-| Linux x64 | `x86_64-unknown-linux-musl` | `@bradsjm/sqlite-mcp-rs-linux-x64` |
-| Linux arm64 | `aarch64-unknown-linux-musl` | `@bradsjm/sqlite-mcp-rs-linux-arm64` |
+| Linux GNU x64 | `x86_64-unknown-linux-gnu` | `@bradsjm/sqlite-mcp-rs-linux-x64-gnu` |
+| Linux GNU arm64 | `aarch64-unknown-linux-gnu` | `@bradsjm/sqlite-mcp-rs-linux-arm64-gnu` |
+| Linux musl x64 | `x86_64-unknown-linux-musl` | `@bradsjm/sqlite-mcp-rs-linux-x64-musl` |
+| Linux musl arm64 | `aarch64-unknown-linux-musl` | `@bradsjm/sqlite-mcp-rs-linux-arm64-musl` |
 | macOS x64 | `x86_64-apple-darwin` | `@bradsjm/sqlite-mcp-rs-darwin-x64` |
 | macOS arm64 | `aarch64-apple-darwin` | `@bradsjm/sqlite-mcp-rs-darwin-arm64` |
 | Windows x64 | `x86_64-pc-windows-msvc` | `@bradsjm/sqlite-mcp-rs-win32-x64` |
 
-The launcher fails fast for unsupported platform and CPU combinations.
+The launcher fails fast for unsupported platforms, unknown/ambiguous libc reports, missing selected payloads, and payload metadata mismatches.
 
 ## Lessons Learned
 
@@ -386,9 +394,9 @@ The release version must come from `Cargo.toml`. Npm and Docker should consume t
 
 Publishing the meta package first creates a broken installation window. The workflow avoids that on purpose.
 
-### Keep Linux npm support simple
+### Keep Linux npm selection explicit
 
-Using musl-only Linux npm payloads removed the need to manage GNU vs musl runtime selection inside the launcher.
+GNU and musl payloads carry distinct identities. Npm metadata filters installs when supported, while the launcher validates libc at runtime so older npm behavior cannot cause a cross-libc fallback.
 
 ### Keep release and container workflows separate
 
@@ -406,9 +414,11 @@ Useful local checks:
 
 - `act -n workflow_dispatch -W .github/workflows/release.yml`
 - `act -n workflow_dispatch -W .github/workflows/publish-docker.yml`
-- direct execution of `scripts/package_release.py`
-- direct execution of `scripts/build_npm_packages.py`
-- local tarball smoke tests with `npm install` and `npx --no-install`
+- `node scripts/test-npm-launcher.js`
+- `uv run --no-project --python 3.12 scripts/test_build_npm_packages.py` with npm 12.0.1 on `PATH`
+- GNU `cargo zigbuild` with the `.2.28` target suffix followed by Rocky Linux 8 `--help`
+- the local inspector suite through `scripts/run-sqlite-mcp-glibc-baseline.sh`
+- local GNU and musl tarball smoke tests with both same-CPU aliases installed
 - local Docker build and `--help` smoke tests for `publish-docker.yml`
 
 Known limitation from the current workflow shape:

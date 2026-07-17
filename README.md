@@ -240,7 +240,7 @@ For `DROP`, `TRUNCATE`, or `DELETE` without `WHERE`, set `confirm_destructive=tr
 
 ### Vector tools unavailable
 
-Run with `--features vector` for collection support, and `--features "vector local-embeddings"` for local embedding/reranking. Linux musl release binaries and npm Linux packages exclude `local-embeddings`.
+Run with `--features vector` for collection support, and `--features "vector local-embeddings"` for local embedding/reranking. Linux GNU npm payloads include local embedding/reranking and require glibc 2.28 or newer; Linux musl release and npm payloads remain vector-only.
 
 ## Development
 

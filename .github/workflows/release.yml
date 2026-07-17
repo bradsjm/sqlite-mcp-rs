@@ -54,6 +54,23 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned npm
+        run: npm install --global npm@12.0.1
+
+      - name: Test npm launcher
+        run: node scripts/test-npm-launcher.js
+
+      - name: Test npm package generation
+        run: python scripts/test_build_npm_packages.py
+
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -85,30 +102,49 @@ jobs:
         include:
           - runner: macos-15
             rust_target: aarch64-apple-darwin
+            build_target: aarch64-apple-darwin
             binary_name: sqlite-mcp-rs
             can_smoke: "true"
             use_zigbuild: "false"
             cargo_features: "vector local-embeddings"
           - runner: macos-15-intel
             rust_target: x86_64-apple-darwin
+            build_target: x86_64-apple-darwin
             binary_name: sqlite-mcp-rs
             can_smoke: "true"
             use_zigbuild: "false"
             cargo_features: "vector local-embeddings"
           - runner: windows-2022
             rust_target: x86_64-pc-windows-msvc
+            build_target: x86_64-pc-windows-msvc
             binary_name: sqlite-mcp-rs.exe
             can_smoke: "true"
             use_zigbuild: "false"
             cargo_features: "vector local-embeddings"
           - runner: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-gnu
+            build_target: x86_64-unknown-linux-gnu.2.28
+            binary_name: sqlite-mcp-rs
+            can_smoke: "true"
+            use_zigbuild: "true"
+            cargo_features: "vector local-embeddings"
+          - runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+            build_target: aarch64-unknown-linux-gnu.2.28
+            binary_name: sqlite-mcp-rs
+            can_smoke: "true"
+            use_zigbuild: "true"
+            cargo_features: "vector local-embeddings"
+          - runner: ubuntu-24.04
             rust_target: x86_64-unknown-linux-musl
+            build_target: x86_64-unknown-linux-musl
             binary_name: sqlite-mcp-rs
             can_smoke: "true"
             use_zigbuild: "true"
             cargo_features: "vector"
           - runner: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-musl
+            build_target: aarch64-unknown-linux-musl
             binary_name: sqlite-mcp-rs
             can_smoke: "true"
             use_zigbuild: "true"
@@ -206,9 +242,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ matrix.use_zigbuild }}" = "true" ]; then
-            cargo zigbuild --release --features "${{ matrix.cargo_features }}" --target ${{ matrix.rust_target }}
+            cargo zigbuild --locked --release --features "${{ matrix.cargo_features }}" --target ${{ matrix.build_target }}
           else
-            cargo build --release --features "${{ matrix.cargo_features }}" --target ${{ matrix.rust_target }}
+            cargo build --locked --release --features "${{ matrix.cargo_features }}" --target ${{ matrix.rust_target }}
           fi
 
       - name: Smoke test binary
@@ -217,6 +253,18 @@ jobs:
         run: |
           set -euo pipefail
           "./target/${{ matrix.rust_target }}/release/${{ matrix.binary_name }}" --help >/dev/null
+      - name: Verify GNU glibc baseline
+        if: ${{ endsWith(matrix.rust_target, '-gnu') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --volume "$PWD:$PWD:ro" \
+            --workdir "$PWD" \
+            rockylinux:8 \
+            "$PWD/target/${{ matrix.rust_target }}/release/${{ matrix.binary_name }}" \
+            --help >/dev/null
+
 
       - name: Package archive
         shell: bash
@@ -247,6 +295,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
+      - name: Install pinned npm
+        run: npm install --global npm@12.0.1
+
 
       - uses: actions/setup-python@v6
         with:
@@ -274,6 +325,78 @@ jobs:
           name: npm-dist
           path: npm-dist/*
 
+  smoke-gnu-model:
+    needs:
+      - package-npm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Install pinned npm
+        run: npm install --global npm@12.0.1
+
+      - name: Download npm tarballs
+        uses: actions/download-artifact@v7
+        with:
+          name: npm-dist
+          path: npm-dist
+
+      - name: Extract GNU payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          PLATFORM_TARBALL=$(node -e 'const fs=require("fs"); const manifest=JSON.parse(fs.readFileSync("npm-dist/manifest.json","utf8")); const platform=`linux-${process.argv[1]}-gnu`; const entry=manifest.platform_packages.find((item)=>item.platform===platform); if(!entry){process.exit(1)} console.log(entry.path);' "${{ matrix.arch }}")
+          mkdir -p "$GITHUB_WORKSPACE/.tmp/npm-gnu-${{ matrix.arch }}"
+          tar -xzf "npm-dist/${PLATFORM_TARBALL}" \
+            -C "$GITHUB_WORKSPACE/.tmp/npm-gnu-${{ matrix.arch }}"
+
+      - name: Cache local models
+        uses: actions/cache@v5
+        with:
+          path: .inspector-cache
+          key: inspector-models-gnu-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Run GNU real-model integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp .inspector-cache/huggingface
+          export SQLITE_EMBEDDING_CACHE_DIR="$PWD/.inspector-cache/huggingface"
+          export SQLITE_RERANKER_CACHE_DIR="$PWD/.inspector-cache/huggingface"
+          SQLITE_INSPECTOR_VECTOR_MODE=local \
+            bash scripts/test-sqlite-mcp-inspector.sh \
+              scripts/run-sqlite-mcp-glibc-baseline.sh \
+              "$GITHUB_WORKSPACE/.tmp/npm-gnu-${{ matrix.arch }}/package/vendor/${{ matrix.rust_target }}/sqlite-mcp-rs" \
+            2>&1 | tee ".tmp/gnu-model-${{ matrix.arch }}.log"
+
+      - name: Upload failure log
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: gnu-model-${{ matrix.arch }}-failure-log
+          path: .tmp/gnu-model-${{ matrix.arch }}.log
+          if-no-files-found: warn
+          retention-days: 7
+
   smoke-npm-native:
     needs:
       - package-npm
@@ -283,19 +406,32 @@ jobs:
         include:
           - runner: macos-14
             alias_name: "@bradsjm/sqlite-mcp-rs-darwin-arm64"
+            secondary_alias_name: ""
+            expected_target: aarch64-apple-darwin
           - runner: macos-15-intel
             alias_name: "@bradsjm/sqlite-mcp-rs-darwin-x64"
+            secondary_alias_name: ""
+            expected_target: x86_64-apple-darwin
           - runner: windows-2022
             alias_name: "@bradsjm/sqlite-mcp-rs-win32-x64"
+            secondary_alias_name: ""
+            expected_target: x86_64-pc-windows-msvc
           - runner: ubuntu-24.04
-            alias_name: "@bradsjm/sqlite-mcp-rs-linux-x64"
+            alias_name: "@bradsjm/sqlite-mcp-rs-linux-x64-gnu"
+            secondary_alias_name: "@bradsjm/sqlite-mcp-rs-linux-x64-musl"
+            expected_target: x86_64-unknown-linux-gnu
           - runner: ubuntu-24.04-arm
-            alias_name: "@bradsjm/sqlite-mcp-rs-linux-arm64"
+            alias_name: "@bradsjm/sqlite-mcp-rs-linux-arm64-gnu"
+            secondary_alias_name: "@bradsjm/sqlite-mcp-rs-linux-arm64-musl"
+            expected_target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
+
+      - name: Install pinned npm
+        run: npm install --global npm@12.0.1
 
       - name: Download npm tarballs
         uses: actions/download-artifact@v7
@@ -308,10 +444,16 @@ jobs:
         run: |
           set -euo pipefail
           META_TARBALL=$(node -e 'const fs=require("fs"); const manifest=JSON.parse(fs.readFileSync("npm-dist/manifest.json","utf8")); console.log(manifest.meta_package.path);')
-          PLATFORM_TARBALL=$(node -e 'const fs=require("fs"); const manifest=JSON.parse(fs.readFileSync("npm-dist/manifest.json","utf8")); const aliasName=process.argv[1]; const entry=manifest.platform_packages.find((item)=>item.alias_name===aliasName); if(!entry){process.exit(1)} console.log(entry.path);' "${{ matrix.alias_name }}")
+          PLATFORM_TARBALL=$(node -e 'const fs=require("fs"); const manifest=JSON.parse(fs.readFileSync("npm-dist/manifest.json","utf8")); const entry=manifest.platform_packages.find((item)=>item.alias_name===process.argv[1]); if(!entry){process.exit(1)} console.log(entry.path);' "${{ matrix.alias_name }}")
           echo "META_TARBALL=$META_TARBALL" >> "$GITHUB_ENV"
           echo "PLATFORM_TARBALL=$PLATFORM_TARBALL" >> "$GITHUB_ENV"
           echo "ALIAS_NAME=${{ matrix.alias_name }}" >> "$GITHUB_ENV"
+          echo "SECONDARY_ALIAS_NAME=${{ matrix.secondary_alias_name }}" >> "$GITHUB_ENV"
+          echo "EXPECTED_TARGET=${{ matrix.expected_target }}" >> "$GITHUB_ENV"
+          if [ -n "${{ matrix.secondary_alias_name }}" ]; then
+            SECONDARY_TARBALL=$(node -e 'const fs=require("fs"); const manifest=JSON.parse(fs.readFileSync("npm-dist/manifest.json","utf8")); const entry=manifest.platform_packages.find((item)=>item.alias_name===process.argv[1]); if(!entry){process.exit(1)} console.log(entry.path);' "${{ matrix.secondary_alias_name }}")
+            echo "SECONDARY_TARBALL=$SECONDARY_TARBALL" >> "$GITHUB_ENV"
+          fi
 
       - name: Run npm smoke test
         shell: bash
@@ -323,7 +465,63 @@ jobs:
           npm install "../npm-dist/${META_TARBALL}" >/dev/null
           mkdir -p "node_modules/${ALIAS_NAME}"
           tar -xzf "../npm-dist/${PLATFORM_TARBALL}" -C "node_modules/${ALIAS_NAME}" --strip-components=1
+          if [ -n "${SECONDARY_ALIAS_NAME}" ]; then
+            mkdir -p "node_modules/${SECONDARY_ALIAS_NAME}"
+            tar -xzf "../npm-dist/${SECONDARY_TARBALL}" -C "node_modules/${SECONDARY_ALIAS_NAME}" --strip-components=1
+          fi
+          node -e 'const {resolvePlatform}=require("@bradsjm/sqlite-mcp-rs/lib/platform"); const actual=resolvePlatform().targetTriple; if(actual!==process.argv[1]){throw new Error(`expected ${process.argv[1]}, got ${actual}`)}' "$EXPECTED_TARGET"
           npx --no-install sqlite-mcp-rs --help >/dev/null
+
+  smoke-npm-musl:
+    needs:
+      - package-npm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            cpu: x64
+            gnu_alias: "@bradsjm/sqlite-mcp-rs-linux-x64-gnu"
+            musl_alias: "@bradsjm/sqlite-mcp-rs-linux-x64-musl"
+            expected_target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            cpu: arm64
+            gnu_alias: "@bradsjm/sqlite-mcp-rs-linux-arm64-gnu"
+            musl_alias: "@bradsjm/sqlite-mcp-rs-linux-arm64-musl"
+            expected_target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Download npm tarballs
+        uses: actions/download-artifact@v7
+        with:
+          name: npm-dist
+          path: npm-dist
+
+      - name: Run npm smoke test in Alpine
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --volume "$PWD:/workspace:ro" \
+            --env GNU_ALIAS="${{ matrix.gnu_alias }}" \
+            --env MUSL_ALIAS="${{ matrix.musl_alias }}" \
+            --env EXPECTED_TARGET="${{ matrix.expected_target }}" \
+            node:24-alpine \
+            sh -euc '
+              npm install --global npm@12.0.1 >/dev/null
+              META_TARBALL=$(node -e '"'"'const fs=require("fs"); const manifest=JSON.parse(fs.readFileSync("/workspace/npm-dist/manifest.json","utf8")); console.log(manifest.meta_package.path);'"'"')
+              GNU_TARBALL=$(node -e '"'"'const fs=require("fs"); const manifest=JSON.parse(fs.readFileSync("/workspace/npm-dist/manifest.json","utf8")); const entry=manifest.platform_packages.find((item)=>item.alias_name===process.argv[1]); if(!entry){process.exit(1)} console.log(entry.path);'"'"' "$GNU_ALIAS")
+              MUSL_TARBALL=$(node -e '"'"'const fs=require("fs"); const manifest=JSON.parse(fs.readFileSync("/workspace/npm-dist/manifest.json","utf8")); const entry=manifest.platform_packages.find((item)=>item.alias_name===process.argv[1]); if(!entry){process.exit(1)} console.log(entry.path);'"'"' "$MUSL_ALIAS")
+              mkdir /tmp/smoke
+              cd /tmp/smoke
+              npm init -y >/dev/null 2>&1
+              npm install "/workspace/npm-dist/${META_TARBALL}" >/dev/null
+              mkdir -p "node_modules/${GNU_ALIAS}" "node_modules/${MUSL_ALIAS}"
+              tar -xzf "/workspace/npm-dist/${GNU_TARBALL}" -C "node_modules/${GNU_ALIAS}" --strip-components=1
+              tar -xzf "/workspace/npm-dist/${MUSL_TARBALL}" -C "node_modules/${MUSL_ALIAS}" --strip-components=1
+              node -e '"'"'const {resolvePlatform}=require("@bradsjm/sqlite-mcp-rs/lib/platform"); const actual=resolvePlatform().targetTriple; if(actual!==process.argv[1]){throw new Error(`expected ${process.argv[1]}, got ${actual}`)}'"'"' "$EXPECTED_TARGET"
+              npx --no-install sqlite-mcp-rs --help >/dev/null
+            '
 
   publish:
     needs:
@@ -331,6 +529,8 @@ jobs:
       - build-release-artifacts
       - package-npm
       - smoke-npm-native
+      - smoke-npm-musl
+      - smoke-gnu-model
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -371,6 +571,8 @@ jobs:
             release/sqlite-mcp-rs-aarch64-apple-darwin.tar.xz \
             release/sqlite-mcp-rs-x86_64-apple-darwin.tar.xz \
             release/sqlite-mcp-rs-x86_64-pc-windows-msvc.zip \
+            release/sqlite-mcp-rs-x86_64-unknown-linux-gnu.tar.xz \
+            release/sqlite-mcp-rs-aarch64-unknown-linux-gnu.tar.xz \
             release/sqlite-mcp-rs-x86_64-unknown-linux-musl.tar.xz \
             release/sqlite-mcp-rs-aarch64-unknown-linux-musl.tar.xz \
             release/sha256.sum; do
@@ -387,7 +589,8 @@ jobs:
           Supported binaries:
           - macOS: Apple Silicon and Intel
           - Windows: x64
-          - Linux: x64 and arm64 via musl builds (vector tools enabled; local embeddings/reranking not included)
+          - Linux GNU: x64 and arm64 (glibc >= 2.28; vector tools and local embedding/reranking enabled)
+          - Linux musl: x64 and arm64 (vector tools enabled; local embedding/reranking unavailable)
 
           Docker images:
           - linux/amd64 (glibc runtime with local embeddings)
@@ -398,6 +601,9 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+      - name: Install pinned npm
+        run: npm install --global npm@12.0.1
+
 
       - name: Publish npm packages
         shell: bash

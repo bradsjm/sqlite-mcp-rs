@@ -22,6 +22,7 @@ PLATFORMS = {
         "artifact_name": "sqlite-mcp-rs-x86_64-apple-darwin.tar.xz",
         "os": "darwin",
         "cpu": "x64",
+        "libc": None,
     },
     "darwin-arm64": {
         "alias_name": "@bradsjm/sqlite-mcp-rs-darwin-arm64",
@@ -29,6 +30,7 @@ PLATFORMS = {
         "artifact_name": "sqlite-mcp-rs-aarch64-apple-darwin.tar.xz",
         "os": "darwin",
         "cpu": "arm64",
+        "libc": None,
     },
     "win32-x64": {
         "alias_name": "@bradsjm/sqlite-mcp-rs-win32-x64",
@@ -36,20 +38,39 @@ PLATFORMS = {
         "artifact_name": "sqlite-mcp-rs-x86_64-pc-windows-msvc.zip",
         "os": "win32",
         "cpu": "x64",
+        "libc": None,
     },
-    "linux-x64": {
-        "alias_name": "@bradsjm/sqlite-mcp-rs-linux-x64",
+    "linux-x64-gnu": {
+        "alias_name": "@bradsjm/sqlite-mcp-rs-linux-x64-gnu",
+        "target_triple": "x86_64-unknown-linux-gnu",
+        "artifact_name": "sqlite-mcp-rs-x86_64-unknown-linux-gnu.tar.xz",
+        "os": "linux",
+        "cpu": "x64",
+        "libc": "glibc",
+    },
+    "linux-arm64-gnu": {
+        "alias_name": "@bradsjm/sqlite-mcp-rs-linux-arm64-gnu",
+        "target_triple": "aarch64-unknown-linux-gnu",
+        "artifact_name": "sqlite-mcp-rs-aarch64-unknown-linux-gnu.tar.xz",
+        "os": "linux",
+        "cpu": "arm64",
+        "libc": "glibc",
+    },
+    "linux-x64-musl": {
+        "alias_name": "@bradsjm/sqlite-mcp-rs-linux-x64-musl",
         "target_triple": "x86_64-unknown-linux-musl",
         "artifact_name": "sqlite-mcp-rs-x86_64-unknown-linux-musl.tar.xz",
         "os": "linux",
         "cpu": "x64",
+        "libc": "musl",
     },
-    "linux-arm64": {
-        "alias_name": "@bradsjm/sqlite-mcp-rs-linux-arm64",
+    "linux-arm64-musl": {
+        "alias_name": "@bradsjm/sqlite-mcp-rs-linux-arm64-musl",
         "target_triple": "aarch64-unknown-linux-musl",
         "artifact_name": "sqlite-mcp-rs-aarch64-unknown-linux-musl.tar.xz",
         "os": "linux",
         "cpu": "arm64",
+        "libc": "musl",
     },
 }
 
@@ -64,12 +85,18 @@ def parse_args() -> argparse.Namespace:
 
 def pack_npm_package(staging_dir: Path, output_dir: Path) -> Path:
     stdout = subprocess.check_output(
-        ["npm", "pack", "--json", "--pack-destination", str(output_dir)],
+        ["npm", "pack", "--force", "--json", "--pack-destination", str(output_dir)],
         cwd=staging_dir,
         text=True,
     )
     pack_output = json.loads(stdout)
-    return output_dir / pack_output[0]["filename"]
+    if isinstance(pack_output, list) and pack_output:
+        package = pack_output[0]
+    elif isinstance(pack_output, dict) and len(pack_output) == 1:
+        package = next(iter(pack_output.values()))
+    else:
+        raise RuntimeError(f"unexpected npm pack output: {pack_output}")
+    return output_dir / package["filename"]
 
 
 def copy_release_binary(archive_path: Path, target_triple: str, staging_dir: Path) -> None:
@@ -121,6 +148,8 @@ def stage_platform_package(
         "homepage": "https://github.com/bradsjm/sqlite-mcp-rs#readme",
         "bugs": {"url": "https://github.com/bradsjm/sqlite-mcp-rs/issues"},
     }
+    if platform["libc"] is not None:
+        package_json["libc"] = [platform["libc"]]
     write_json(staging_dir / "package.json", package_json)
     copy_release_binary(artifacts_dir / platform["artifact_name"], platform["target_triple"], staging_dir)
     return pack_npm_package(staging_dir, output_dir)
@@ -129,6 +158,7 @@ def stage_platform_package(
 def stage_meta_package(version: str, output_dir: Path) -> Path:
     staging_dir = Path(tempfile.mkdtemp(prefix="sqlite-mcp-rs-meta-"))
     shutil.copytree(NPM_META_ROOT / "bin", staging_dir / "bin")
+    shutil.copytree(NPM_META_ROOT / "lib", staging_dir / "lib")
     shutil.copy2(REPO_ROOT / "README.md", staging_dir / "README.md")
     shutil.copy2(REPO_ROOT / "LICENSE", staging_dir / "LICENSE")
 
