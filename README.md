@@ -262,6 +262,26 @@ Run integration checks against MCP Inspector over HTTP transport:
 bash scripts/test-sqlite-mcp-inspector-http.sh cargo run --
 ```
 
+The stdio script defaults to `SQLITE_INSPECTOR_VECTOR_MODE=disabled`, which
+asserts that vector tools are absent. Use `degraded` to test a `vector` build
+without downloading models:
+
+```bash
+SQLITE_INSPECTOR_VECTOR_MODE=degraded \
+  bash scripts/test-sqlite-mcp-inspector.sh cargo run --features vector --
+```
+
+Use `local` for the real FastEmbed embedding and reranking flow:
+
+```bash
+SQLITE_INSPECTOR_VECTOR_MODE=local \
+  bash scripts/test-sqlite-mcp-inspector.sh cargo run --features local-embeddings --
+```
+
+Pull requests and pushes to `main` run the deterministic Rust and MCP matrix in
+`.github/workflows/integration.yml`. The network-dependent real-model flow runs
+weekly or on demand through `.github/workflows/model-integration.yml`.
+
 Show CLI help:
 
 ```bash

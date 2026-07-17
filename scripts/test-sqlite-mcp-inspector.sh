@@ -19,6 +19,16 @@ SQLITE_INSPECTOR_SEED_SQL="${SQLITE_INSPECTOR_SEED_SQL:-$REPO_ROOT/tests/fixture
 SQLITE_RERANKER_PROVIDER="${SQLITE_RERANKER_PROVIDER:-fastembed}"
 SQLITE_RERANKER_MODEL="${SQLITE_RERANKER_MODEL:-BAAI/bge-reranker-base}"
 SQLITE_MODEL_CACHE_DIR="${SQLITE_MODEL_CACHE_DIR:-$REPO_ROOT/.inspector-cache/huggingface}"
+SQLITE_INSPECTOR_VECTOR_MODE="${SQLITE_INSPECTOR_VECTOR_MODE:-disabled}"
+SQLITE_MCP_INSPECTOR_VERSION="${SQLITE_MCP_INSPECTOR_VERSION:-0.22.0}"
+
+case "$SQLITE_INSPECTOR_VECTOR_MODE" in
+  disabled | degraded | local) ;;
+  *)
+    echo "SQLITE_INSPECTOR_VECTOR_MODE must be one of: disabled, degraded, local" >&2
+    exit 2
+    ;;
+esac
 
 if [[ "$#" -eq 0 ]]; then
   echo "usage: scripts/test-sqlite-mcp-inspector.sh <mcp-server-command> [args...]" >&2
@@ -137,7 +147,7 @@ run_inspector() {
   SQLITE_RERANKER_MODEL="$SQLITE_RERANKER_MODEL" \
   SQLITE_EMBEDDING_CACHE_DIR="$SQLITE_MODEL_CACHE_DIR" \
   SQLITE_RERANKER_CACHE_DIR="$SQLITE_MODEL_CACHE_DIR" \
-  npx -y @modelcontextprotocol/inspector --cli "${SERVER_COMMAND[@]}" "$@"
+  npx -y "@modelcontextprotocol/inspector@${SQLITE_MCP_INSPECTOR_VERSION}" --cli "${SERVER_COMMAND[@]}" "$@"
 }
 
 assert_json() {
@@ -181,10 +191,9 @@ run_tests() {
   local vector_list_json
   local vector_search_json
   local vector_rerank_json
-  local has_vector_tools
-  local vector_status_err
-  local vector_run_id
+  local vector_tool_count
 
+  local vector_run_id
   echo "Checking MCP tool discovery"
   tools_json=$(run_inspector --method tools/list)
   assert_json "$tools_json" '
@@ -199,15 +208,22 @@ run_tests() {
     and ([.. | .format? | select(type == "string" and (. == "int64" or . == "uint64" or . == "double"))] | length == 0)
   '
 
-  has_vector_tools=$(printf '%s\n' "$tools_json" | jq -r '
+  vector_tool_count=$(printf '%s\n' "$tools_json" | jq -r '
     ((.tools // .result.tools // []) | map(.name)) as $names
-    | if (($names | index("vector_status") != null)
-      and ($names | index("vector_collection_create") != null)
-      and ($names | index("vector_upsert") != null)
-      and ($names | index("vector_search") != null)
-      and ($names | index("vector_collection_list") != null))
-      then "true" else "false" end
+    | ["vector_status", "vector_collection_create", "vector_upsert", "vector_search", "vector_collection_list"]
+    | map(select(. as $name | $names | index($name) != null))
+    | length
   ')
+  if [[ "$SQLITE_INSPECTOR_VECTOR_MODE" == "disabled" ]]; then
+    if [[ "$vector_tool_count" -ne 0 ]]; then
+      echo "disabled mode requires all five vector tools to be absent" >&2
+      exit 1
+    fi
+  elif [[ "$vector_tool_count" -ne 5 ]]; then
+    echo "${SQLITE_INSPECTOR_VECTOR_MODE} mode requires all five vector tools to be present" >&2
+    exit 1
+  fi
+
   vector_run_id=$(date +%s)
 
   echo "Checking default database bootstrap through MCP inspector"
@@ -300,34 +316,71 @@ run_tests() {
     and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).rows_inserted == 2)
   '
 
-  if [[ "$has_vector_tools" == "true" ]]; then
+  if [[ "$SQLITE_INSPECTOR_VECTOR_MODE" == "degraded" ]]; then
+    echo "Checking degraded vector runtime through MCP inspector"
+    vector_status_json=$(run_inspector \
+      --method tools/call \
+      --tool-name vector_status \
+      --tool-arg "db_id=${active_db_id}" \
+      --tool-arg prewarm=false)
+    assert_json "$vector_status_json" '
+      (.isError != true)
+      and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).embedding.ready == false)
+      and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).reranker.ready == false)
+    '
+
+    echo "Creating vector collection with degraded runtime"
+    vector_create_json=$(run_inspector \
+      --method tools/call \
+      --tool-name vector_collection_create \
+      --tool-arg "db_id=${active_db_id}" \
+      --tool-arg collection=inspector_vectors \
+      --tool-arg if_not_exists=true)
+    assert_json "$vector_create_json" '(.isError != true)'
+
+    echo "Listing vector collections with degraded runtime"
+    vector_list_json=$(run_inspector \
+      --method tools/call \
+      --tool-name vector_collection_list \
+      --tool-arg "db_id=${active_db_id}")
+    assert_json "$vector_list_json" '
+      (.isError != true)
+      and (((.structuredContent.data // .data // .result.structuredContent.data // .result.data).collections // [])
+        | map(select(.collection == "inspector_vectors"))
+        | length) == 1
+    '
+
+    echo "Checking degraded vector upsert failure"
+    expect_failure_with_text "vector backend is not available" \
+      --method tools/call \
+      --tool-name vector_upsert \
+      --tool-arg "db_id=${active_db_id}" \
+      --tool-arg collection=inspector_vectors \
+      --tool-arg on_conflict=replace \
+      --tool-arg 'items=[{"id":"degraded_doc","text":"Embedding backend is unavailable."}]'
+
+    echo "Checking degraded vector search failure"
+    expect_failure_with_text "vector backend is not available" \
+      --method tools/call \
+      --tool-name vector_search \
+      --tool-arg "db_id=${active_db_id}" \
+      --tool-arg collection=inspector_vectors \
+      --tool-arg 'query_text=unavailable embedding backend' \
+      --tool-arg top_k=1
+  elif [[ "$SQLITE_INSPECTOR_VECTOR_MODE" == "local" ]]; then
     echo "Pre-downloading vector and reranker models"
     HF_CACHE_DIR="$SQLITE_MODEL_CACHE_DIR" bash "$REPO_ROOT/scripts/download-models.sh"
 
     echo "Running vector_status through MCP inspector"
-    vector_status_err=$(mktemp)
-    if ! vector_status_json=$(run_inspector \
+    vector_status_json=$(run_inspector \
       --method tools/call \
       --tool-name vector_status \
       --tool-arg "db_id=${active_db_id}" \
-      --tool-arg prewarm=true 2>"$vector_status_err"); then
-      vector_status_json=$(cat "$vector_status_err")
-      if [[ "$vector_status_json" == *"vector feature is not enabled"* ]]; then
-        echo "Vector tools are listed but vector feature is disabled at runtime; skipping vector/embedding/reranking inspector checks"
-        vector_status_json=""
-      else
-        echo "$vector_status_json" >&2
-        rm -f "$vector_status_err"
-        exit 1
-      fi
-    fi
-    rm -f "$vector_status_err"
-
-    if [[ -n "$vector_status_json" ]]; then
+      --tool-arg prewarm=true)
     assert_json "$vector_status_json" '
       (.isError != true)
       and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).embedding.ready == true)
-      and (((.structuredContent.data // .data // .result.structuredContent.data // .result.data).reranker // {"ready": false}).ready == true)
+      and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).reranker.ready == true)
     '
 
     echo "Creating vector collection through MCP inspector"
@@ -394,9 +447,6 @@ run_tests() {
       and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).reranked == true)
       and ((.structuredContent.data // .data // .result.structuredContent.data // .result.data).matches | length) >= 1
     '
-    fi
-  else
-    echo "Vector tools not available in this build; skipping vector/embedding/reranking inspector checks"
   fi
 
   echo "Checking destructive guard over MCP"

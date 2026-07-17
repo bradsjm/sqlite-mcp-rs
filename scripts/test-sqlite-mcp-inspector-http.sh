@@ -23,6 +23,7 @@ SQLITE_INSPECTOR_SEED_SQL="${SQLITE_INSPECTOR_SEED_SQL:-$REPO_ROOT/tests/fixture
 SQLITE_RERANKER_PROVIDER="${SQLITE_RERANKER_PROVIDER:-fastembed}"
 SQLITE_RERANKER_MODEL="${SQLITE_RERANKER_MODEL:-BAAI/bge-reranker-base}"
 SQLITE_MODEL_CACHE_DIR="${SQLITE_MODEL_CACHE_DIR:-$REPO_ROOT/.inspector-cache/huggingface}"
+SQLITE_MCP_INSPECTOR_VERSION="${SQLITE_MCP_INSPECTOR_VERSION:-0.22.0}"
 
 if [[ "$#" -eq 0 ]]; then
   echo "usage: scripts/test-sqlite-mcp-inspector-http.sh <mcp-server-command> [args...]" >&2
@@ -121,7 +122,7 @@ require_tools() {
 }
 
 run_inspector() {
-  npx -y @modelcontextprotocol/inspector --cli "$SQLITE_HTTP_SERVER_URL" --transport http "$@"
+  npx -y "@modelcontextprotocol/inspector@${SQLITE_MCP_INSPECTOR_VERSION}" --cli "$SQLITE_HTTP_SERVER_URL" --transport http "$@"
 }
 
 assert_json() {

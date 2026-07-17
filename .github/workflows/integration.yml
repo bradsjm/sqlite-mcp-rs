@@ -1,26 +1,115 @@
-name: SQLite Integration Tests
+name: Integration
 
 on:
+  pull_request:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
-jobs:
-  sqlite-tests:
-    runs-on: ubuntu-latest
+permissions:
+  contents: read
 
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  SQLITE_MCP_INSPECTOR_VERSION: "0.22.0"
+
+jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+  test:
+    name: Test (${{ matrix.configuration }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - configuration: default
+            cargo-arguments: ""
+          - configuration: vector
+            cargo-arguments: --features vector
+          - configuration: all-features
+            cargo-arguments: --all-features
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --locked ${{ matrix.cargo-arguments }}
+
+  mcp-integration:
+    name: MCP integration (${{ matrix.configuration }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - configuration: default-stdio
+            script: scripts/test-sqlite-mcp-inspector.sh
+            cargo-arguments: ""
+            vector-mode: disabled
+          - configuration: default-http
+            script: scripts/test-sqlite-mcp-inspector-http.sh
+            cargo-arguments: ""
+            vector-mode: disabled
+          - configuration: degraded-vector-stdio
+            script: scripts/test-sqlite-mcp-inspector.sh
+            cargo-arguments: --features vector
+            vector-mode: degraded
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Install Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run real fastembed model integration test
-        run: cargo test --features vector adapters::reranker::tests::downloads_and_uses_real_fastembed_models -- --ignored --exact --nocapture
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
 
-      - name: Run MCP inspector integration tests
-        run: bash scripts/test-sqlite-mcp-inspector.sh cargo run --features vector --
+      - name: Run MCP Inspector integration
+        env:
+          SQLITE_INSPECTOR_VECTOR_MODE: ${{ matrix.vector-mode }}
+        run: bash "${{ matrix.script }}" cargo run --locked ${{ matrix.cargo-arguments }} --

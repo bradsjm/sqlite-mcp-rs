@@ -48,6 +48,7 @@ jobs:
 
   validate:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
         with:
@@ -63,10 +64,16 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
-      - name: Test
-        run: cargo test
+      - name: Test default features
+        run: cargo test --locked
+
+      - name: Test vector feature
+        run: cargo test --locked --features vector
+
+      - name: Test all features
+        run: cargo test --locked --all-features
 
   build-release-artifacts:
     needs:

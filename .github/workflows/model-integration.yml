@@ -1,0 +1,70 @@
+name: Model Integration
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  SQLITE_INSPECTOR_VECTOR_MODE: local
+  SQLITE_MCP_INSPECTOR_VERSION: "0.22.0"
+
+jobs:
+  model-integration:
+    name: Real-model integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache local models
+        uses: actions/cache@v5
+        with:
+          path: .inspector-cache
+          key: inspector-models-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Run real-model integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp
+          export SQLITE_EMBEDDING_CACHE_DIR="$PWD/.inspector-cache/huggingface"
+          export SQLITE_RERANKER_CACHE_DIR="$PWD/.inspector-cache/huggingface"
+          {
+            printf '%s\n%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cache-warm","version":"1"}}}' \
+              '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+              | cargo run --locked --features local-embeddings --
+            bash scripts/test-sqlite-mcp-inspector.sh cargo run --locked --features local-embeddings --
+          } 2>&1 | tee .tmp/model-integration.log
+
+      - name: Upload failure log
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: model-integration-failure-log
+          path: .tmp/model-integration.log
+          if-no-files-found: warn
+          retention-days: 7
