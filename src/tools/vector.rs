@@ -1715,10 +1715,15 @@ mod tests {
         )
         .expect("unbounded search should succeed");
         let mut empty_response = unbounded;
+        let full_response_bytes = serde_json::to_vec(&empty_response)
+            .expect("full envelope should encode")
+            .len();
         empty_response.data.matches.clear();
-        let max_bytes = serde_json::to_vec(&empty_response)
+        let empty_response_bytes = serde_json::to_vec(&empty_response)
             .expect("empty envelope should encode")
             .len();
+        let max_bytes = empty_response_bytes + 128;
+        assert!(full_response_bytes > max_bytes);
 
         let error = vector_search(
             &registry,
