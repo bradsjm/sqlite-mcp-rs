@@ -117,8 +117,8 @@ SQLITE_PERSIST_ROOT=                       # optional; if unset, only ephemeral 
 SQLITE_LOG_LEVEL=info
 SQLITE_MAX_SQL_LENGTH=20000
 SQLITE_MAX_STATEMENTS=50
-SQLITE_MAX_ROWS=500
-SQLITE_MAX_BYTES=1048576
+SQLITE_MAX_ROWS=100
+SQLITE_MAX_BYTES=65536
 SQLITE_MAX_DB_BYTES=100000000
 SQLITE_MAX_PERSISTED_LIST_ENTRIES=500
 SQLITE_CURSOR_TTL_SECONDS=600
@@ -138,7 +138,7 @@ Build/run with vector collection support:
 cargo run --features vector
 ```
 
-Add local embeddings and reranking:
+Add local embeddings; configure reranking only when needed:
 
 ```bash
 cargo run --features "vector local-embeddings"
@@ -153,13 +153,15 @@ SQLITE_MAX_RERANK_FETCH_K=500
 ```
 
 Local embedding environment variables (`local-embeddings` feature only):
+Reranking is opt-in: leave all `SQLITE_RERANKER_*` keys empty to disable it.
+
 
 ```bash
 SQLITE_EMBEDDING_PROVIDER=fastembed
 SQLITE_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
 SQLITE_EMBEDDING_CACHE_DIR=                # optional
-SQLITE_RERANKER_PROVIDER=fastembed         # optional (only if reranker enabled)
-SQLITE_RERANKER_MODEL=BAAI/bge-reranker-base  # optional (only if reranker enabled)
+SQLITE_RERANKER_PROVIDER=                  # leave empty to keep reranking disabled
+SQLITE_RERANKER_MODEL=                     # leave empty to keep reranking disabled
 SQLITE_RERANKER_CACHE_DIR=                 # optional
 ```
 
@@ -172,9 +174,7 @@ All tools return a consistent envelope:
   "summary": "Human-readable outcome",
   "data": {},
   "_meta": {
-    "now_utc": "2026-03-02T00:00:00Z",
-    "elapsed_ms": 12,
-    "request_id": "uuid-v4"
+    "now_utc": "2026-03-02T00:00:00Z"
   }
 }
 ```
@@ -207,6 +207,7 @@ All tools return a consistent envelope:
 
 | Tool | Purpose |
 |------|---------|
+| `vector_status` | Check vector runtime readiness and optionally prewarm models |
 | `vector_collection_create` | Create vector collection backing tables |
 | `vector_collection_list` | List vector collections and metadata |
 | `vector_upsert` | Upsert embedded vector documents |

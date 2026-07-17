@@ -13,6 +13,7 @@ This document defines the stable MCP tool surface for `sqlite-mcp-rs`.
 - `db_import`
 - `queue_push`
 - `queue_wait`
+- `vector_status` (feature-gated: `vector`) — Check vector runtime readiness and optionally prewarm models
 - `vector_collection_create` (feature-gated: `vector`)
 - `vector_collection_list` (feature-gated: `vector`)
 - `vector_upsert` (feature-gated: `vector`)
@@ -26,10 +27,6 @@ All successful tool responses return:
 - `data: object` (tool-specific payload)
 - `hints?: ToolHint[]` (omitted when empty)
 - `_meta.now_utc: string` (RFC3339 UTC)
-- `_meta.elapsed_ms: number`
-- `_meta.request_id: string` (UUID v4)
-- `_meta.truncated?: boolean`
-- `_meta.next_cursor?: string`
 
 `ToolHint` shape:
 
@@ -329,6 +326,33 @@ Validation and behavior:
 - Returns success with `timed_out=true` and no `job` when no matching row appears before timeout.
 - Delivery semantics are broadcast/read-only visibility (multiple waiters may observe the same row).
 
+## `vector_status` (feature `vector`)
+
+Description: Check vector runtime readiness and optionally prewarm models.
+
+Input:
+
+- `db_id?: string` (default `"default"`)
+- `prewarm?: boolean` (default `true`)
+
+Success `data` shape:
+
+- `db_id: string`
+- `ort_ready: boolean`
+- `ort_dylib_path?: string`
+- `prewarm_attempted: boolean`
+- `embedding: VectorBackendStatus`
+- `reranker: VectorBackendStatus`
+
+`VectorBackendStatus`:
+
+- `provider: string`
+- `model: string`
+- `dimension: number`
+- `cache_dir?: string`
+- `ready: boolean`
+- `issues: VectorIssue[]`
+
 ## `vector_collection_create` (feature `vector`)
 
 Description: create metadata and backing tables for a vector collection.
@@ -383,12 +407,12 @@ Input:
 - `db_id?: string` (default `"default"`)
 - `collection: string`
 - `on_conflict?: "replace" | "ignore" | "update_metadata"` (default `"replace"`)
-- `items: VectorDocument[]` (must be non-empty)
+- `items: VectorDocument[]` (must contain `1..=SQLITE_MAX_ROWS` items)
 
 `VectorDocument`:
 
-- `id: string`
-- `text: string`
+- `id: string` (at most 512 characters)
+- `text: string` (at most 16,384 characters)
 - `metadata?: object`
 
 Success `data` shape:
@@ -399,6 +423,7 @@ Success `data` shape:
 Validation and enforcement:
 
 - Collection must exist.
+- The serialized `items` payload must be `<= SQLITE_MAX_BYTES`.
 - Embedding dimension must match collection dimension.
 - Runs in a transaction; failures rollback.
 - For persisted DBs, post-write file size must be `<= SQLITE_MAX_DB_BYTES`.
@@ -411,7 +436,7 @@ Input:
 
 - `db_id?: string` (default `"default"`)
 - `collection: string`
-- `query_text: string`
+- `query_text: string` (at most 16,384 characters)
 - `top_k?: number` (default `10`, min effective `1`)
 - `include_text?: boolean` (default `false`)
 - `include_metadata?: boolean` (default `false`)
@@ -446,6 +471,8 @@ Behavior:
 
 - Base ranking is produced by sqlite-vec KNN (`vec0`) using query embedding distance.
 - Optional metadata filtering is applied after initial KNN candidate retrieval.
+- The complete serialized `ToolEnvelope` response is capped at `SQLITE_MAX_BYTES`; matches are truncated to fit.
+- The tool returns `LIMIT_EXCEEDED` when the fixed response or even a single match cannot fit within that ceiling.
 - `rerank="on"` without configured reranker does not fail the tool; it returns `issues` with `RERANK_UNAVAILABLE` and falls back to distance ranking.
 - Reranker runtime failures do not fail the tool; it returns `issues` with `RERANK_FAILED` and falls back to distance ranking.
 
@@ -488,12 +515,17 @@ Runtime configuration keys:
 - `SQLITE_QUEUE_POLL_INTERVAL_MS_MIN`
 - `SQLITE_QUEUE_POLL_INTERVAL_MS_MAX`
 
-Vector feature keys (required when `vector` is enabled unless noted):
+Vector feature keys (when `vector` is enabled):
+
+- `SQLITE_VECTOR_DIMENSION` (default `384`)
+- `SQLITE_MAX_VECTOR_TOP_K` (default `200`)
+- `SQLITE_MAX_RERANK_FETCH_K` (default `500`)
+
+Local embedding keys (when `local-embeddings` is enabled):
 
 - `SQLITE_EMBEDDING_PROVIDER` (optional; default `fastembed`)
 - `SQLITE_EMBEDDING_MODEL` (optional; default `BAAI/bge-small-en-v1.5`)
 - `SQLITE_EMBEDDING_CACHE_DIR` (optional; if unset, fastembed uses Hugging Face cache env/defaults)
-- `SQLITE_RERANKER_PROVIDER` (optional, but required if any reranker key is set; `builtin`)
-- `SQLITE_RERANKER_MODEL` (optional, but required if reranker is configured)
-- `SQLITE_RERANKER_ENDPOINT` (optional)
-- `SQLITE_RERANKER_TIMEOUT_MS` (optional; default `10000`)
+- `SQLITE_RERANKER_PROVIDER` (optional; default `fastembed` when reranker is configured)
+- `SQLITE_RERANKER_MODEL` (optional; default `BAAI/bge-reranker-base` when reranker is configured)
+- `SQLITE_RERANKER_CACHE_DIR` (optional; if unset, fastembed uses Hugging Face cache env/defaults)

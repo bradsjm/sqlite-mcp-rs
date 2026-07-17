@@ -1,3 +1,5 @@
+use std::io::{self, Write};
+
 use std::cmp::Ordering;
 #[cfg(all(test, feature = "local-embeddings"))]
 use std::collections::HashMap;
@@ -28,6 +30,55 @@ use crate::db::registry::DbRegistry;
 use crate::errors::{AppError, AppResult};
 use crate::policy::is_valid_identifier;
 use crate::server::finalize::finalize_tool;
+
+pub const MAX_VECTOR_TEXT_CHARS: usize = 16_384;
+pub const MAX_VECTOR_ID_CHARS: usize = 512;
+
+/// Counts serialized bytes without retaining a duplicate request payload.
+struct CappedWriter {
+    max_bytes: usize,
+    written: usize,
+    exceeded: bool,
+}
+
+impl CappedWriter {
+    const fn new(max_bytes: usize) -> Self {
+        Self {
+            max_bytes,
+            written: 0,
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for CappedWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if buffer.len() > self.max_bytes.saturating_sub(self.written) {
+            self.exceeded = true;
+            return Err(io::Error::other("serialized payload exceeds byte cap"));
+        }
+
+        self.written += buffer.len();
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_exceeds_max_bytes<T: serde::Serialize>(
+    value: &T,
+    max_bytes: usize,
+) -> Result<bool, serde_json::Error> {
+    let mut counter = CappedWriter::new(max_bytes);
+    let result = serde_json::to_writer(&mut counter, value);
+    if counter.exceeded {
+        Ok(true)
+    } else {
+        result.map(|_| false)
+    }
+}
 
 enum EmbeddingBackend {
     Unavailable,
@@ -566,11 +617,11 @@ pub fn vector_upsert(
     runtime: &VectorRuntime,
     request: VectorUpsertRequest,
     max_db_bytes: u64,
+    max_rows: usize,
+    max_bytes: usize,
 ) -> AppResult<ToolEnvelope<VectorUpsertData>> {
     let started = Instant::now();
     let db_id = request.db_id.unwrap_or_else(|| DEFAULT_DB_ID.to_string());
-    let connection = registry.get_connection(Some(&db_id))?;
-    let persisted_path = registry.persisted_path(Some(&db_id))?;
 
     if request.items.is_empty() {
         return Err(AppError::InvalidInput(
@@ -578,10 +629,41 @@ pub fn vector_upsert(
         ));
     }
 
+    if request.items.len() > max_rows {
+        return Err(AppError::LimitExceeded(format!(
+            "vector upsert item count exceeds max_rows ({max_rows})"
+        )));
+    }
+    for (index, item) in request.items.iter().enumerate() {
+        if item.id.chars().count() > MAX_VECTOR_ID_CHARS {
+            return Err(AppError::LimitExceeded(format!(
+                "item {index} id exceeds {MAX_VECTOR_ID_CHARS} characters"
+            )));
+        }
+        if item.text.chars().count() > MAX_VECTOR_TEXT_CHARS {
+            return Err(AppError::LimitExceeded(format!(
+                "item {index} text exceeds {MAX_VECTOR_TEXT_CHARS} characters"
+            )));
+        }
+    }
+
+    let mut payload_counter = CappedWriter::new(max_bytes);
+    let payload_result = serde_json::to_writer(&mut payload_counter, &request.items);
+    if payload_counter.exceeded {
+        return Err(AppError::LimitExceeded(format!(
+            "vector upsert payload exceeds max_bytes ({max_bytes})"
+        )));
+    }
+    payload_result.map_err(|error| {
+        AppError::Dependency(format!("failed to encode vector upsert payload: {error}"))
+    })?;
+
+    let connection = registry.get_connection(Some(&db_id))?;
+    let persisted_path = registry.persisted_path(Some(&db_id))?;
+
     runtime
         .prewarm_embedding()
         .map_err(|error| vector_dependency_error("embedding_init", runtime, error))?;
-
     let collection = load_collection(connection, &request.collection)?;
     let conflict_mode = request.on_conflict;
     let mut upserted_count = 0usize;
@@ -705,10 +787,16 @@ pub fn vector_search(
     request: VectorSearchRequest,
     max_top_k: usize,
     max_rerank_fetch_k: usize,
+    max_bytes: usize,
 ) -> AppResult<ToolEnvelope<VectorSearchData>> {
     let started = Instant::now();
     let db_id = request.db_id.unwrap_or_else(|| DEFAULT_DB_ID.to_string());
     let connection = registry.get_connection(Some(&db_id))?;
+    if request.query_text.chars().count() > MAX_VECTOR_TEXT_CHARS {
+        return Err(AppError::LimitExceeded(format!(
+            "query text exceeds {MAX_VECTOR_TEXT_CHARS} characters"
+        )));
+    }
 
     let collection = load_collection(connection, &request.collection)?;
     runtime
@@ -841,7 +929,7 @@ pub fn vector_search(
                         });
                         selected.truncate(top_k);
                     } else {
-                        for (candidate, score) in selected.iter_mut().zip(scores.into_iter()) {
+                        for (candidate, score) in selected.iter_mut().zip(scores) {
                             candidate.score = Some(score);
                         }
                         selected.sort_by(|left, right| {
@@ -901,9 +989,37 @@ pub fn vector_search(
         }
     }
 
-    let matches = selected
-        .into_iter()
-        .map(|candidate| VectorMatch {
+    let base_truncated = candidates.len() > top_k;
+    let build_response = |matches, truncated| {
+        finalize_tool(
+            "Vector search completed.",
+            VectorSearchData {
+                matches,
+                truncated,
+                reranked,
+                rerank_model: rerank_model.clone(),
+                issues: issues.clone(),
+            },
+            started,
+            Vec::new(),
+            None,
+            None,
+        )
+    };
+
+    let mut response = build_response(Vec::new(), base_truncated);
+    if serialized_exceeds_max_bytes(&response, max_bytes).map_err(|error| {
+        AppError::Dependency(format!("failed to encode vector search response: {error}"))
+    })? {
+        return Err(AppError::LimitExceeded(format!(
+            "vector search response exceeds max_bytes ({max_bytes})"
+        )));
+    }
+
+    let mut matches = std::mem::take(&mut response.data.matches);
+    let mut output_truncated = false;
+    for candidate in selected {
+        matches.push(VectorMatch {
             id: candidate.id,
             distance: candidate.distance,
             score: candidate.score,
@@ -912,23 +1028,36 @@ pub fn vector_search(
                 .include_metadata
                 .then_some(candidate.metadata)
                 .flatten(),
-        })
-        .collect::<Vec<_>>();
+        });
 
-    Ok(finalize_tool(
-        "Vector search completed.",
-        VectorSearchData {
-            matches,
-            truncated: candidates.len() > top_k,
-            reranked,
-            rerank_model,
-            issues,
-        },
-        started,
-        Vec::new(),
-        None,
-        None,
-    ))
+        response = build_response(matches, base_truncated);
+        if serialized_exceeds_max_bytes(&response, max_bytes).map_err(|error| {
+            AppError::Dependency(format!("failed to encode vector search response: {error}"))
+        })? {
+            matches = response.data.matches;
+            matches.pop();
+            if matches.is_empty() {
+                return Err(AppError::LimitExceeded(
+                    "a single vector match exceeds max_bytes".to_string(),
+                ));
+            }
+            output_truncated = true;
+            break;
+        }
+
+        matches = response.data.matches;
+    }
+
+    response = build_response(matches, base_truncated || output_truncated);
+    if serialized_exceeds_max_bytes(&response, max_bytes).map_err(|error| {
+        AppError::Dependency(format!("failed to encode vector search response: {error}"))
+    })? {
+        return Err(AppError::LimitExceeded(format!(
+            "vector search response exceeds max_bytes ({max_bytes})"
+        )));
+    }
+
+    Ok(response)
 }
 
 #[derive(Debug, Clone)]
@@ -1289,6 +1418,8 @@ mod tests {
                 ],
             },
             u64::MAX,
+            usize::MAX,
+            usize::MAX,
         )
         .expect("upsert should succeed");
         assert_eq!(upserted.data.upserted_count, 2);
@@ -1312,6 +1443,7 @@ mod tests {
             },
             200,
             500,
+            usize::MAX,
         )
         .expect("search should succeed");
 
@@ -1329,6 +1461,290 @@ mod tests {
         );
         assert!(!searched.data.reranked);
         assert!(searched.data.issues.is_empty());
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[test]
+    fn vector_upsert_rejects_item_count_before_embedding_work() {
+        let registry = setup_registry();
+        let runtime = runtime_without_backend(3);
+
+        let error = vector_upsert(
+            &registry,
+            &runtime,
+            VectorUpsertRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                on_conflict: VectorConflictMode::Replace,
+                items: vec![
+                    VectorDocument {
+                        id: "a".to_string(),
+                        text: "doc-alpha".to_string(),
+                        metadata: None,
+                    },
+                    VectorDocument {
+                        id: "b".to_string(),
+                        text: "doc-beta".to_string(),
+                        metadata: None,
+                    },
+                ],
+            },
+            u64::MAX,
+            1,
+            usize::MAX,
+        )
+        .expect_err("item count over configured cap must fail before embedding initialization");
+
+        assert!(matches!(
+            error,
+            AppError::LimitExceeded(message)
+                if message == "vector upsert item count exceeds max_rows (1)"
+        ));
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[test]
+    fn vector_upsert_rejects_capped_payload_before_embedding_work() {
+        let registry = setup_registry();
+        let runtime = runtime_without_backend(3);
+        let mut metadata = Map::new();
+        metadata.insert("oversized".to_string(), Value::String("x".repeat(256)));
+
+        let error = vector_upsert(
+            &registry,
+            &runtime,
+            VectorUpsertRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                on_conflict: VectorConflictMode::Replace,
+                items: vec![VectorDocument {
+                    id: "a".to_string(),
+                    text: "doc-alpha".to_string(),
+                    metadata: Some(metadata),
+                }],
+            },
+            u64::MAX,
+            usize::MAX,
+            64,
+        )
+        .expect_err("capped payload over configured cap must fail before embedding initialization");
+
+        assert!(matches!(
+            error,
+            AppError::LimitExceeded(message)
+                if message == "vector upsert payload exceeds max_bytes (64)"
+        ));
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[test]
+    fn vector_search_truncates_matches_to_max_bytes() {
+        let registry = setup_registry();
+        let runtime = VectorRuntime::with_test_embeddings(
+            embedding_config(3),
+            None,
+            HashMap::from([
+                ("doc-alpha".to_string(), vec![1.0, 0.0, 0.0]),
+                ("doc-beta".to_string(), vec![0.0, 1.0, 0.0]),
+                ("query-alpha".to_string(), vec![1.0, 0.0, 0.0]),
+            ]),
+        );
+
+        vector_collection_create(
+            &registry,
+            &runtime,
+            VectorCollectionCreateRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                if_not_exists: false,
+            },
+            u64::MAX,
+        )
+        .expect("collection create should succeed");
+        vector_upsert(
+            &registry,
+            &runtime,
+            VectorUpsertRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                on_conflict: VectorConflictMode::Replace,
+                items: vec![
+                    VectorDocument {
+                        id: "a".to_string(),
+                        text: "doc-alpha".to_string(),
+                        metadata: None,
+                    },
+                    VectorDocument {
+                        id: "b".to_string(),
+                        text: "doc-beta".to_string(),
+                        metadata: None,
+                    },
+                ],
+            },
+            u64::MAX,
+            usize::MAX,
+            usize::MAX,
+        )
+        .expect("upsert should succeed");
+
+        let unbounded = vector_search(
+            &registry,
+            &runtime,
+            VectorSearchRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                query_text: "query-alpha".to_string(),
+                top_k: Some(2),
+                include_text: true,
+                include_metadata: false,
+                filter: None,
+                rerank: RerankMode::Off,
+                rerank_fetch_k: None,
+            },
+            200,
+            500,
+            usize::MAX,
+        )
+        .expect("unbounded search should succeed");
+        assert_eq!(unbounded.data.matches.len(), 2);
+
+        let full_envelope_bytes = serde_json::to_vec(&unbounded)
+            .expect("full envelope should encode")
+            .len();
+        let mut one_match = unbounded.clone();
+        one_match.data.matches.pop();
+        one_match.data.truncated = true;
+        let one_match_envelope_bytes = serde_json::to_vec(&one_match)
+            .expect("one-match envelope should encode")
+            .len();
+        let max_bytes =
+            one_match_envelope_bytes + (full_envelope_bytes - one_match_envelope_bytes) / 2;
+        assert!(max_bytes < full_envelope_bytes);
+
+        let searched = vector_search(
+            &registry,
+            &runtime,
+            VectorSearchRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                query_text: "query-alpha".to_string(),
+                top_k: Some(2),
+                include_text: true,
+                include_metadata: false,
+                filter: None,
+                rerank: RerankMode::Off,
+                rerank_fetch_k: None,
+            },
+            200,
+            500,
+            max_bytes,
+        )
+        .expect("search should truncate the complete envelope to the configured byte cap");
+
+        assert_eq!(searched.data.matches.len(), 1);
+        assert!(searched.data.truncated);
+        let returned_envelope_bytes = serde_json::to_vec(&searched)
+            .expect("returned envelope should encode")
+            .len();
+        assert!(returned_envelope_bytes <= max_bytes);
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[test]
+    fn vector_search_rejects_oversized_metadata_match_at_envelope_cap() {
+        let registry = setup_registry();
+        let runtime = VectorRuntime::with_test_embeddings(
+            embedding_config(3),
+            None,
+            HashMap::from([
+                ("doc-alpha".to_string(), vec![1.0, 0.0, 0.0]),
+                ("query-alpha".to_string(), vec![1.0, 0.0, 0.0]),
+            ]),
+        );
+
+        vector_collection_create(
+            &registry,
+            &runtime,
+            VectorCollectionCreateRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                if_not_exists: false,
+            },
+            u64::MAX,
+        )
+        .expect("collection create should succeed");
+
+        let mut metadata = Map::new();
+        metadata.insert("payload".to_string(), Value::String("x".repeat(512)));
+        vector_upsert(
+            &registry,
+            &runtime,
+            VectorUpsertRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                on_conflict: VectorConflictMode::Replace,
+                items: vec![VectorDocument {
+                    id: "a".to_string(),
+                    text: "doc-alpha".to_string(),
+                    metadata: Some(metadata),
+                }],
+            },
+            u64::MAX,
+            usize::MAX,
+            usize::MAX,
+        )
+        .expect("upsert should succeed");
+
+        let unbounded = vector_search(
+            &registry,
+            &runtime,
+            VectorSearchRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                query_text: "query-alpha".to_string(),
+                top_k: Some(1),
+                include_text: true,
+                include_metadata: true,
+                filter: None,
+                rerank: RerankMode::Off,
+                rerank_fetch_k: None,
+            },
+            200,
+            500,
+            usize::MAX,
+        )
+        .expect("unbounded search should succeed");
+        let mut empty_response = unbounded;
+        empty_response.data.matches.clear();
+        let max_bytes = serde_json::to_vec(&empty_response)
+            .expect("empty envelope should encode")
+            .len();
+
+        let error = vector_search(
+            &registry,
+            &runtime,
+            VectorSearchRequest {
+                db_id: None,
+                collection: "items".to_string(),
+                query_text: "query-alpha".to_string(),
+                top_k: Some(1),
+                include_text: true,
+                include_metadata: true,
+                filter: None,
+                rerank: RerankMode::Off,
+                rerank_fetch_k: None,
+            },
+            200,
+            500,
+            max_bytes,
+        )
+        .expect_err("oversized metadata must not bypass the envelope cap");
+
+        assert!(matches!(
+            error,
+            AppError::LimitExceeded(message)
+                if message == "a single vector match exceeds max_bytes"
+        ));
     }
 
     #[cfg(feature = "local-embeddings")]
@@ -1367,6 +1783,8 @@ mod tests {
                 }],
             },
             u64::MAX,
+            usize::MAX,
+            usize::MAX,
         )
         .expect_err("dimension mismatch must fail");
 
@@ -1425,6 +1843,8 @@ mod tests {
                 ],
             },
             u64::MAX,
+            usize::MAX,
+            usize::MAX,
         )
         .expect("upsert should succeed");
 
@@ -1444,6 +1864,7 @@ mod tests {
             },
             200,
             500,
+            usize::MAX,
         )
         .expect("search should succeed");
 
@@ -1500,6 +1921,8 @@ mod tests {
                 ],
             },
             u64::MAX,
+            usize::MAX,
+            usize::MAX,
         )
         .expect("upsert should succeed");
 
@@ -1519,6 +1942,7 @@ mod tests {
             },
             200,
             500,
+            usize::MAX,
         )
         .expect("search should succeed");
 
@@ -1569,6 +1993,8 @@ mod tests {
                 }],
             },
             u64::MAX,
+            usize::MAX,
+            usize::MAX,
         )
         .expect("upsert should succeed");
 
@@ -1588,6 +2014,7 @@ mod tests {
             },
             50,
             100,
+            usize::MAX,
         )
         .expect_err("top_k over configured cap must fail");
 
@@ -1638,6 +2065,8 @@ mod tests {
                 }],
             },
             u64::MAX,
+            usize::MAX,
+            usize::MAX,
         )
         .expect("upsert should succeed");
 
@@ -1657,6 +2086,7 @@ mod tests {
             },
             50,
             100,
+            usize::MAX,
         )
         .expect_err("rerank_fetch_k below top_k must fail");
 
@@ -1724,6 +2154,8 @@ mod tests {
                 }],
             },
             u64::MAX,
+            usize::MAX,
+            usize::MAX,
         )
         .expect_err("upsert should fail when embedding backend is unavailable");
 
@@ -1771,6 +2203,7 @@ mod tests {
             },
             200,
             500,
+            usize::MAX,
         )
         .expect_err("search should fail when embedding backend is unavailable");
 

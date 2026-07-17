@@ -79,24 +79,26 @@ pub fn db_import(
     }
 
     let table_exists = import_table_exists(connection, &request.table)?;
-    if !table_exists {
-        if request.create_table_if_missing {
-            create_import_table(
-                connection,
-                &request.table,
-                &columns,
-                &rows,
-                request.infer_column_types,
-            )?;
-        } else {
-            return Err(AppError::NotFound(format!(
-                "table {} does not exist; set create_table_if_missing=true to create it",
-                request.table
-            )));
-        }
+    if !table_exists && !request.create_table_if_missing {
+        return Err(AppError::NotFound(format!(
+            "table {} does not exist; set create_table_if_missing=true to create it",
+            request.table
+        )));
     }
 
     connection.execute_batch("BEGIN IMMEDIATE TRANSACTION")?;
+    if !table_exists
+        && let Err(error) = create_import_table(
+            connection,
+            &request.table,
+            &columns,
+            &rows,
+            request.infer_column_types,
+        )
+    {
+        let _ = connection.execute_batch("ROLLBACK");
+        return Err(error);
+    }
     if request.truncate_first {
         let truncate_sql = format!("DELETE FROM {}", quote_identifier(&request.table));
         if let Err(error) = connection.execute(&truncate_sql, []) {
@@ -109,10 +111,17 @@ pub fn db_import(
     let mut skipped = 0usize;
     let sql = build_insert_sql(&request.table, &columns, request.on_conflict);
     for (index, row) in rows.iter().enumerate() {
-        let values = row
+        let values = match row
             .iter()
             .map(json_to_sql_value)
-            .collect::<AppResult<Vec<_>>>()?;
+            .collect::<AppResult<Vec<_>>>()
+        {
+            Ok(values) => values,
+            Err(error) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                return Err(error);
+            }
+        };
 
         match connection.execute(&sql, rusqlite::params_from_iter(values)) {
             Ok(affected) => {
@@ -142,7 +151,10 @@ pub fn db_import(
         return Err(error);
     }
 
-    connection.execute_batch("COMMIT")?;
+    if let Err(error) = connection.execute_batch("COMMIT") {
+        let _ = connection.execute_batch("ROLLBACK");
+        return Err(error.into());
+    }
 
     let mut hints = Vec::new();
     hints.push(ToolHint {
@@ -536,5 +548,45 @@ mod tests {
             }
             other => panic!("expected not found error, got: {other}"),
         }
+    }
+
+    #[test]
+    fn failed_import_rolls_back_auto_created_table() {
+        let registry = setup_registry();
+        let connection = registry
+            .get_connection(Some("default"))
+            .expect("default db should exist");
+        connection
+            .pragma_update(None, "max_page_count", 1)
+            .expect("page limit should be configured");
+
+        let error = db_import(
+            &registry,
+            &test_policy(),
+            DbImportRequest {
+                db_id: None,
+                format: ImportFormat::Json,
+                table: "rolled_back_table".to_string(),
+                columns: Vec::new(),
+                data: json_rows(&[json!({"value": "x".repeat(16_384)})]),
+                batch_size: None,
+                on_conflict: None,
+                truncate_first: false,
+                create_table_if_missing: true,
+                infer_column_types: true,
+            },
+        )
+        .expect_err("insert should exceed the configured page limit");
+
+        assert!(matches!(error, AppError::Sql(_)));
+        assert!(
+            connection.is_autocommit(),
+            "failed import must not leave an open transaction"
+        );
+        assert!(
+            !super::import_table_exists(connection, "rolled_back_table")
+                .expect("table lookup should succeed"),
+            "failed import must not leave its auto-created table behind"
+        );
     }
 }

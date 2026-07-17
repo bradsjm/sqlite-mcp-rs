@@ -123,14 +123,17 @@ pub fn split_sql_statements(sql: &str) -> Vec<String> {
     statements
 }
 
-/// Checks if SQL contains blocked statements (ATTACH, LOAD_EXTENSION).
+/// Checks if SQL contains blocked statements (ATTACH, LOAD_EXTENSION, or
+/// mutations of connection-wide database size settings).
 ///
 /// Returns true if the SQL contains any blocked statements that could
 /// compromise security or access unauthorized resources.
 pub fn contains_blocked_sql(sql: &str) -> bool {
     split_sql_statements(sql).iter().any(|statement| {
         let normalized = normalize_sql_outside_literals(statement);
-        normalized.trim_start().starts_with("ATTACH") || contains_load_extension_call(&normalized)
+        normalized.trim_start().starts_with("ATTACH")
+            || contains_load_extension_call(&normalized)
+            || contains_page_limit_mutation(statement)
     })
 }
 
@@ -309,6 +312,107 @@ fn contains_load_extension_call(sql: &str) -> bool {
     false
 }
 
+/// Detects assignment and call forms of PRAGMAs that could remove the database
+/// size ceiling without interpreting string or comment content as SQL.
+fn contains_page_limit_mutation(sql: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let mut index = skip_sql_trivia(bytes, 0);
+    let Some((pragma, next)) = read_pragma_identifier(bytes, index) else {
+        return false;
+    };
+    if !pragma.eq_ignore_ascii_case("PRAGMA") {
+        return false;
+    }
+
+    index = skip_sql_trivia(bytes, next);
+    let Some((first_name, next)) = read_pragma_identifier(bytes, index) else {
+        return false;
+    };
+    index = skip_sql_trivia(bytes, next);
+    let pragma_name = if bytes.get(index) == Some(&b'.') {
+        index = skip_sql_trivia(bytes, index + 1);
+        let Some((name, next)) = read_pragma_identifier(bytes, index) else {
+            return false;
+        };
+        index = skip_sql_trivia(bytes, next);
+        name
+    } else {
+        first_name
+    };
+
+    (pragma_name.eq_ignore_ascii_case("MAX_PAGE_COUNT")
+        || pragma_name.eq_ignore_ascii_case("PAGE_SIZE"))
+        && matches!(bytes.get(index), Some(b'=') | Some(b'('))
+}
+
+fn skip_sql_trivia(bytes: &[u8], mut index: usize) -> usize {
+    loop {
+        while bytes
+            .get(index)
+            .is_some_and(|byte| (*byte as char).is_ascii_whitespace())
+        {
+            index += 1;
+        }
+
+        match (bytes.get(index), bytes.get(index + 1)) {
+            (Some(b'-'), Some(b'-')) => {
+                index += 2;
+                while bytes.get(index).is_some_and(|byte| *byte != b'\n') {
+                    index += 1;
+                }
+            }
+            (Some(b'/'), Some(b'*')) => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                if index + 1 < bytes.len() {
+                    index += 2;
+                }
+            }
+            _ => return index,
+        }
+    }
+}
+
+fn read_pragma_identifier(bytes: &[u8], start: usize) -> Option<(&str, usize)> {
+    let first = *bytes.get(start)?;
+    if (first as char).is_ascii_alphabetic() || first == b'_' {
+        let mut end = start + 1;
+        while bytes
+            .get(end)
+            .is_some_and(|byte| is_identifier_char(*byte as char))
+        {
+            end += 1;
+        }
+        return std::str::from_utf8(&bytes[start..end])
+            .ok()
+            .map(|name| (name, end));
+    }
+
+    let closing = match first {
+        b'\'' | b'"' => first,
+        b'[' => b']',
+        _ => return None,
+    };
+    let mut end = start + 1;
+    while end < bytes.len() {
+        if bytes[end] == closing {
+            if closing != b']' && bytes.get(end + 1) == Some(&closing) {
+                end += 2;
+            } else {
+                return std::str::from_utf8(&bytes[start + 1..end])
+                    .ok()
+                    .map(|name| (name, end + 1));
+            }
+        } else {
+            end += 1;
+        }
+    }
+    None
+}
+
 fn contains_identifier_token(sql: &str, token: &str) -> bool {
     let bytes = sql.as_bytes();
     let token_bytes = token.as_bytes();
@@ -359,6 +463,30 @@ mod tests {
         assert!(contains_blocked_sql("select load_extension('bad')"));
         assert!(!contains_blocked_sql("select 'ATTACH', 'LOAD_EXTENSION('"));
         assert!(!contains_blocked_sql("select 1"));
+    }
+
+    #[test]
+    fn blocks_page_limit_pragma_mutations_without_blocking_reads() {
+        for sql in [
+            "PRAGMA max_page_count = 10",
+            "PRAGMA main.max_page_count=10",
+            "PRAGMA page_size(4096)",
+            "PRAGMA temp.page_size (4096)",
+            "PRAGMA \"max_page_count\" = 10",
+            "PRAGMA main.[page_size](4096)",
+        ] {
+            assert!(contains_blocked_sql(sql), "{sql} should be blocked");
+        }
+
+        for sql in [
+            "PRAGMA max_page_count",
+            "PRAGMA main.page_size",
+            "SELECT 'PRAGMA page_size = 4096'",
+            "-- PRAGMA max_page_count = 10\nSELECT 1",
+            "/* PRAGMA page_size(4096) */ SELECT 1",
+        ] {
+            assert!(!contains_blocked_sql(sql), "{sql} should remain allowed");
+        }
     }
 
     #[test]

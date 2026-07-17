@@ -1,4 +1,4 @@
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
@@ -68,17 +68,30 @@ pub fn sql_query(
         .iter()
         .map(|name| (*name).to_string())
         .collect::<Vec<_>>();
+    let mut column_names = HashSet::with_capacity(columns.len());
+    for name in &columns {
+        if !column_names.insert(name) {
+            return Err(AppError::InvalidInput(format!(
+                "duplicate column name '{name}' in result; use unique aliases"
+            )));
+        }
+    }
 
     let offset = existing_cursor.as_ref().map_or(0, |cursor| cursor.offset);
     let mut rows = statement.raw_query();
-    let mut consumed = 0usize;
+    let mut skipped = 0usize;
     let mut returned_rows = Vec::new();
-    let mut used_bytes = 0usize;
     let mut truncated = false;
+    // Bound rows incrementally so we never collect, clone, or serialize a large
+    // over-budget set just to reject it. The probe loop below accounts for the
+    // remaining fixed envelope overhead (summary, cursor, hints).
+    let mut used_bytes = serde_json::to_vec(&columns)
+        .map_err(|error| AppError::Dependency(format!("failed to encode query columns: {error}")))?
+        .len();
 
     while let Some(row) = rows.next()? {
-        if consumed < offset {
-            consumed += 1;
+        if skipped < offset {
+            skipped += 1;
             continue;
         }
 
@@ -93,65 +106,126 @@ pub fn sql_query(
             .len();
 
         if used_bytes + row_size > max_bytes {
-            if returned_rows.is_empty() {
-                return Err(AppError::LimitExceeded(
-                    "a single result row exceeds max_bytes".to_string(),
-                ));
-            }
             truncated = true;
             break;
         }
 
         used_bytes += row_size;
         returned_rows.push(row_map);
-        consumed += 1;
     }
 
-    let next_offset = offset + returned_rows.len();
-    let mut hints = Vec::new();
-    let mut next_cursor = None;
+    let initial_row_count = returned_rows.len();
+    loop {
+        let needs_cursor = truncated;
+        let placeholder_cursor = needs_cursor
+            .then(|| "00000000-0000-0000-0000-000000000000".to_string())
+            .filter(|_| cursor_store.enabled());
+        let probe_hints = placeholder_cursor
+            .as_ref()
+            .map(|cursor_id| {
+                vec![ToolHint {
+                    tool: "sql_query".to_string(),
+                    arguments: json!({ "db_id": db_id, "cursor": cursor_id }),
+                    reason: "Continue reading the remaining rows with this cursor.".to_string(),
+                }]
+            })
+            .unwrap_or_default();
+        let probe = finalize_tool(
+            "Query executed.",
+            SqlQueryData {
+                columns: columns.clone(),
+                row_count: returned_rows.len(),
+                rows: returned_rows.clone(),
+                truncated,
+                next_cursor: placeholder_cursor,
+            },
+            started,
+            probe_hints,
+            Some(truncated),
+            None,
+        );
+        let probe_size = serde_json::to_vec(&probe)
+            .map_err(|error| {
+                AppError::Dependency(format!("failed to encode query response: {error}"))
+            })?
+            .len();
 
-    if truncated {
-        let state = CursorState {
-            db_id: db_id.clone(),
-            fingerprint: fingerprint_query(&db_id, &sql, params.as_ref(), max_rows, max_bytes)?,
-            offset: next_offset,
-            sql: sql.clone(),
-            params: params.clone(),
-            max_rows,
-            max_bytes,
+        if probe_size > max_bytes {
+            if returned_rows.pop().is_none() {
+                let message = if initial_row_count == 0 {
+                    "query response exceeds max_bytes"
+                } else {
+                    "a single result row exceeds max_bytes"
+                };
+                return Err(AppError::LimitExceeded(message.to_string()));
+            }
+            truncated = true;
+            continue;
+        }
+
+        if let Some(cursor_id) = existing_cursor_id.as_ref() {
+            cursor_store.delete(cursor_id);
+        }
+        let next_cursor = if truncated {
+            let state = CursorState {
+                db_id: db_id.clone(),
+                fingerprint: fingerprint_query(&db_id, &sql, params.as_ref(), max_rows, max_bytes)?,
+                offset: offset + returned_rows.len(),
+                sql: sql.clone(),
+                params: params.clone(),
+                max_rows,
+                max_bytes,
+            };
+            cursor_store.create(state)
+        } else {
+            None
         };
-        if let Some(cursor_id) = existing_cursor_id {
+        let hints = next_cursor
+            .as_ref()
+            .map(|cursor_id| {
+                vec![ToolHint {
+                    tool: "sql_query".to_string(),
+                    arguments: json!({ "db_id": db_id, "cursor": cursor_id }),
+                    reason: "Continue reading the remaining rows with this cursor.".to_string(),
+                }]
+            })
+            .unwrap_or_default();
+        let response = finalize_tool(
+            "Query executed.",
+            SqlQueryData {
+                columns: columns.clone(),
+                row_count: returned_rows.len(),
+                rows: returned_rows.clone(),
+                truncated,
+                next_cursor: next_cursor.clone(),
+            },
+            started,
+            hints,
+            Some(truncated),
+            next_cursor.clone(),
+        );
+        let response_size = serde_json::to_vec(&response)
+            .map_err(|error| {
+                AppError::Dependency(format!("failed to encode query response: {error}"))
+            })?
+            .len();
+        if response_size <= max_bytes {
+            return Ok(response);
+        }
+
+        if let Some(cursor_id) = next_cursor {
             cursor_store.delete(&cursor_id);
         }
-        if let Some(cursor_id) = cursor_store.create(state) {
-            hints.push(ToolHint {
-                tool: "sql_query".to_string(),
-                arguments: json!({ "db_id": db_id, "cursor": cursor_id }),
-                reason: "Continue reading the remaining rows with this cursor.".to_string(),
-            });
-            next_cursor = Some(cursor_id);
+        if returned_rows.pop().is_none() {
+            let message = if initial_row_count == 0 {
+                "query response exceeds max_bytes"
+            } else {
+                "a single result row exceeds max_bytes"
+            };
+            return Err(AppError::LimitExceeded(message.to_string()));
         }
-    } else if let Some(cursor_id) = existing_cursor_id {
-        cursor_store.delete(&cursor_id);
+        truncated = true;
     }
-
-    let data = SqlQueryData {
-        columns,
-        row_count: returned_rows.len(),
-        rows: returned_rows,
-        truncated,
-        next_cursor: next_cursor.clone(),
-    };
-
-    Ok(finalize_tool(
-        "Query executed.",
-        data,
-        started,
-        hints,
-        Some(truncated),
-        next_cursor,
-    ))
 }
 
 pub fn sql_execute(
@@ -446,8 +520,14 @@ fn resolve_query_request(
     let sql = request.sql.ok_or_else(|| {
         AppError::InvalidInput("sql is required when cursor is omitted".to_string())
     })?;
-    let max_rows = request.max_rows.unwrap_or(policy.max_rows);
-    let max_bytes = request.max_bytes.unwrap_or(policy.max_bytes);
+    let max_rows = request
+        .max_rows
+        .unwrap_or(policy.max_rows)
+        .min(policy.max_rows);
+    let max_bytes = request
+        .max_bytes
+        .unwrap_or(policy.max_bytes)
+        .min(policy.max_bytes);
     if max_rows == 0 {
         return Err(AppError::InvalidInput(
             "max_rows must be greater than zero".to_string(),
@@ -602,22 +682,25 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use crate::contracts::db::DbMode;
     use crate::contracts::sql::{
-        BatchStatement, BatchTransactionMode, SqlBatchRequest, SqlExecuteRequest,
+        BatchStatement, BatchTransactionMode, SqlBatchRequest, SqlExecuteRequest, SqlQueryRequest,
     };
     use crate::db::registry::DbRegistry;
     use crate::errors::AppError;
+    use crate::pagination::cursor_store::CursorStore;
     use crate::policy::SqlPolicy;
 
-    use super::{sql_batch, sql_execute, statement_is_insert};
+    use super::{sql_batch, sql_execute, sql_query, statement_is_insert};
 
     fn test_policy() -> SqlPolicy {
         SqlPolicy {
             max_sql_length: 20_000,
             max_statements: 50,
-            max_rows: 500,
-            max_bytes: 1_048_576,
+            max_rows: 100,
+            max_bytes: 65_536,
             max_db_bytes: u64::MAX,
         }
     }
@@ -725,5 +808,142 @@ mod tests {
 
         assert_eq!(response.data.rows_affected, 0);
         assert_eq!(response.data.last_insert_rowid, None);
+    }
+
+    #[test]
+    fn sql_query_clamps_row_override_to_policy_limit() {
+        let registry = setup_registry();
+        let policy = SqlPolicy {
+            max_rows: 2,
+            max_bytes: 65_536,
+            ..test_policy()
+        };
+        let mut cursors = CursorStore::new(Duration::from_secs(60), 10);
+        let response = sql_query(
+            &registry,
+            &mut cursors,
+            &policy,
+            SqlQueryRequest {
+                db_id: None,
+                sql: Some("select 1 as n union all select 2 union all select 3".to_string()),
+                params: None,
+                max_rows: Some(3),
+                max_bytes: Some(65_536),
+                cursor: None,
+            },
+        )
+        .expect("query should respect the policy row limit");
+
+        assert_eq!(response.data.row_count, 2);
+        assert!(response.data.truncated);
+        assert!(response.data.next_cursor.is_some());
+    }
+
+    #[test]
+    fn sql_query_rejects_oversized_zero_row_envelope() {
+        let registry = setup_registry();
+        let policy = SqlPolicy {
+            max_bytes: 128,
+            ..test_policy()
+        };
+        let mut cursors = CursorStore::new(Duration::from_secs(60), 10);
+        let alias = "x".repeat(512);
+        let error = sql_query(
+            &registry,
+            &mut cursors,
+            &policy,
+            SqlQueryRequest {
+                db_id: None,
+                sql: Some(format!("select 1 as \"{alias}\" where false")),
+                params: None,
+                max_rows: None,
+                max_bytes: None,
+                cursor: None,
+            },
+        )
+        .expect_err("an oversized zero-row envelope must be rejected");
+
+        assert!(matches!(error, AppError::LimitExceeded(_)));
+    }
+
+    #[test]
+    fn sql_query_trims_rows_for_cursor_envelope_overhead() {
+        let registry = setup_registry();
+        let policy = SqlPolicy {
+            max_rows: 2,
+            ..test_policy()
+        };
+        let request = SqlQueryRequest {
+            db_id: None,
+            sql: Some("select 1 as n union all select 2 union all select 3".to_string()),
+            params: None,
+            max_rows: None,
+            max_bytes: None,
+            cursor: None,
+        };
+        let mut baseline_cursors = CursorStore::new(Duration::from_secs(60), 10);
+        let baseline = sql_query(&registry, &mut baseline_cursors, &policy, request.clone())
+            .expect("baseline paginated query should succeed");
+        let budget = serde_json::to_vec(&baseline)
+            .expect("baseline response should serialize")
+            .len()
+            - 1;
+
+        let mut cursors = CursorStore::new(Duration::from_secs(60), 10);
+        let response = sql_query(
+            &registry,
+            &mut cursors,
+            &policy,
+            SqlQueryRequest {
+                max_bytes: Some(budget),
+                ..request
+            },
+        )
+        .expect("query should trim a row to fit the complete envelope");
+
+        assert_eq!(response.data.row_count, 1);
+        assert_eq!(response.data.rows[0]["n"], 1);
+        assert!(response.data.truncated);
+        assert!(
+            serde_json::to_vec(&response)
+                .expect("returned response should serialize")
+                .len()
+                <= budget
+        );
+        let cursor = response
+            .data
+            .next_cursor
+            .as_deref()
+            .expect("truncated response should include a cursor");
+        let state = cursors.get(cursor).expect("cursor should remain usable");
+        assert_eq!(state.offset, 1);
+    }
+
+    #[test]
+    fn sql_query_rejects_duplicate_column_names() {
+        let registry = setup_registry();
+        let mut cursors = CursorStore::new(Duration::from_secs(60), 10);
+        let error = sql_query(
+            &registry,
+            &mut cursors,
+            &test_policy(),
+            SqlQueryRequest {
+                db_id: None,
+                sql: Some("select 1 as a, 2 as a".to_string()),
+                params: None,
+                max_rows: None,
+                max_bytes: None,
+                cursor: None,
+            },
+        )
+        .expect_err("duplicate column names must be rejected");
+
+        match error {
+            AppError::InvalidInput(message) => assert_eq!(
+                message,
+                "duplicate column name 'a' in result; use unique aliases"
+            ),
+            other => panic!("expected invalid input, got: {other}"),
+        }
     }
 }

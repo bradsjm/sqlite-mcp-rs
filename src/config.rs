@@ -147,8 +147,8 @@ impl AppConfig {
             log_level: log_level(&lookup, "SQLITE_LOG_LEVEL", "info")?,
             max_sql_length: positive_usize(&lookup, "SQLITE_MAX_SQL_LENGTH", 20_000)?,
             max_statements: positive_usize(&lookup, "SQLITE_MAX_STATEMENTS", 50)?,
-            max_rows: positive_usize(&lookup, "SQLITE_MAX_ROWS", 500)?,
-            max_bytes: positive_usize(&lookup, "SQLITE_MAX_BYTES", 1_048_576)?,
+            max_rows: positive_usize(&lookup, "SQLITE_MAX_ROWS", 100)?,
+            max_bytes: positive_usize(&lookup, "SQLITE_MAX_BYTES", 65_536)?,
             max_db_bytes: positive_u64(&lookup, "SQLITE_MAX_DB_BYTES", 100_000_000)?,
             max_persisted_list_entries: positive_usize(
                 &lookup,
@@ -462,8 +462,8 @@ mod tests {
         .expect("config should parse with defaults");
         assert_eq!(cfg.max_sql_length, 20_000);
         assert_eq!(cfg.max_statements, 50);
-        assert_eq!(cfg.max_rows, 500);
-        assert_eq!(cfg.max_persisted_list_entries, 500);
+        assert_eq!(cfg.max_rows, 100);
+        assert_eq!(cfg.max_bytes, 65_536);
         assert_eq!(cfg.log_level, "info");
         assert_eq!(cfg.queue_wait_timeout_ms_default, 30_000);
         assert_eq!(cfg.queue_wait_timeout_ms_max, 120_000);

@@ -6,10 +6,6 @@ use std::time::Instant;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData as McpError, Json, ServerHandler, model::*, tool, tool_handler, tool_router};
-#[cfg(not(feature = "vector"))]
-use schemars::JsonSchema;
-#[cfg(not(feature = "vector"))]
-use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::task;
 use uuid::Uuid;
@@ -47,16 +43,6 @@ pub struct SqliteMcpServer {
     #[cfg(feature = "vector")]
     vector_runtime: Arc<VectorRuntime>,
     tool_router: ToolRouter<Self>,
-}
-
-#[cfg(not(feature = "vector"))]
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct VectorDisabledRequest {}
-
-#[cfg(not(feature = "vector"))]
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct VectorDisabledData {
-    message: String,
 }
 
 impl SqliteMcpServer {
@@ -283,14 +269,6 @@ impl SqliteMcpServer {
         )
     }
 
-    #[cfg(not(feature = "vector"))]
-    fn vector_disabled_error() -> McpError {
-        Self::map_error(
-            AppError::InvalidInput("vector feature is not enabled".to_string()),
-            None,
-        )
-    }
-
     async fn run_blocking<T, F>(&self, task_fn: F) -> AppResult<T>
     where
         T: Send + 'static,
@@ -319,7 +297,11 @@ impl SqliteMcpServer {
     }
 }
 
-#[tool_router]
+#[cfg_attr(
+    feature = "vector",
+    tool_router(router = core_tool_router)
+)]
+#[cfg_attr(not(feature = "vector"), tool_router)]
 impl SqliteMcpServer {
     #[tool(
         name = "db_open",
@@ -693,19 +675,11 @@ impl SqliteMcpServer {
             tokio::time::sleep(Duration::from_millis(plan.poll_interval_ms)).await;
         }
     }
+}
 
-    #[tool(
-        name = "vector_collection_create",
-        description = "Create a vector collection backing tables"
-    )]
-    #[cfg(not(feature = "vector"))]
-    async fn vector_collection_create(
-        &self,
-        Parameters(_request): Parameters<VectorDisabledRequest>,
-    ) -> Result<Json<ToolEnvelope<VectorDisabledData>>, McpError> {
-        Err(Self::vector_disabled_error())
-    }
-
+#[cfg(feature = "vector")]
+#[tool_router(router = vector_tool_router)]
+impl SqliteMcpServer {
     #[tool(
         name = "vector_collection_create",
         description = "Create a vector collection backing tables"
@@ -760,18 +734,6 @@ impl SqliteMcpServer {
         name = "vector_collection_list",
         description = "List vector collections"
     )]
-    #[cfg(not(feature = "vector"))]
-    async fn vector_collection_list(
-        &self,
-        Parameters(_request): Parameters<VectorDisabledRequest>,
-    ) -> Result<Json<ToolEnvelope<VectorDisabledData>>, McpError> {
-        Err(Self::vector_disabled_error())
-    }
-
-    #[tool(
-        name = "vector_collection_list",
-        description = "List vector collections"
-    )]
     #[cfg(feature = "vector")]
     async fn vector_collection_list(
         &self,
@@ -809,18 +771,6 @@ impl SqliteMcpServer {
             false,
         );
         Ok(Json(response))
-    }
-
-    #[tool(
-        name = "vector_status",
-        description = "Check vector runtime readiness and optionally prewarm models"
-    )]
-    #[cfg(not(feature = "vector"))]
-    async fn vector_status(
-        &self,
-        Parameters(_request): Parameters<VectorDisabledRequest>,
-    ) -> Result<Json<ToolEnvelope<VectorDisabledData>>, McpError> {
-        Err(Self::vector_disabled_error())
     }
 
     #[tool(
@@ -868,18 +818,6 @@ impl SqliteMcpServer {
         name = "vector_upsert",
         description = "Upsert vector documents; call vector_status to diagnose model/runtime issues"
     )]
-    #[cfg(not(feature = "vector"))]
-    async fn vector_upsert(
-        &self,
-        Parameters(_request): Parameters<VectorDisabledRequest>,
-    ) -> Result<Json<ToolEnvelope<VectorDisabledData>>, McpError> {
-        Err(Self::vector_disabled_error())
-    }
-
-    #[tool(
-        name = "vector_upsert",
-        description = "Upsert vector documents; call vector_status to diagnose model/runtime issues"
-    )]
     #[cfg(feature = "vector")]
     async fn vector_upsert(
         &self,
@@ -892,10 +830,19 @@ impl SqliteMcpServer {
             .clone()
             .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
         let max_db_bytes = self.config.max_db_bytes;
+        let max_rows = self.config.max_rows;
+        let max_bytes = self.config.max_bytes;
         let vector_runtime = Arc::clone(&self.vector_runtime);
         let response = match self
             .run_blocking(move |registry, _cursors| {
-                tools::vector::vector_upsert(registry, &vector_runtime, request, max_db_bytes)
+                tools::vector::vector_upsert(
+                    registry,
+                    &vector_runtime,
+                    request,
+                    max_db_bytes,
+                    max_rows,
+                    max_bytes,
+                )
             })
             .await
         {
@@ -920,18 +867,6 @@ impl SqliteMcpServer {
         name = "vector_search",
         description = "Search vector collections; call vector_status to diagnose model/runtime issues"
     )]
-    #[cfg(not(feature = "vector"))]
-    async fn vector_search(
-        &self,
-        Parameters(_request): Parameters<VectorDisabledRequest>,
-    ) -> Result<Json<ToolEnvelope<VectorDisabledData>>, McpError> {
-        Err(Self::vector_disabled_error())
-    }
-
-    #[tool(
-        name = "vector_search",
-        description = "Search vector collections; call vector_status to diagnose model/runtime issues"
-    )]
     #[cfg(feature = "vector")]
     async fn vector_search(
         &self,
@@ -945,6 +880,7 @@ impl SqliteMcpServer {
             .unwrap_or_else(|| crate::DEFAULT_DB_ID.to_string());
         let max_vector_top_k = self.config.vector.max_top_k;
         let max_rerank_fetch_k = self.config.vector.max_rerank_fetch_k;
+        let max_bytes = self.config.max_bytes;
         let vector_runtime = Arc::clone(&self.vector_runtime);
         let response = match self
             .run_blocking(move |registry, _cursors| {
@@ -954,6 +890,7 @@ impl SqliteMcpServer {
                     request,
                     max_vector_top_k,
                     max_rerank_fetch_k,
+                    max_bytes,
                 )
             })
             .await
@@ -977,6 +914,15 @@ impl SqliteMcpServer {
     }
 }
 
+#[cfg(feature = "vector")]
+impl SqliteMcpServer {
+    fn tool_router() -> ToolRouter<Self> {
+        let mut router = Self::core_tool_router();
+        router.merge(Self::vector_tool_router());
+        router
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for SqliteMcpServer {
     fn get_info(&self) -> ServerInfo {
@@ -988,6 +934,8 @@ impl ServerHandler for SqliteMcpServer {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use rmcp::model::Tool;
     use serde_json::Map;
     use serde_json::Value;
@@ -1100,6 +1048,48 @@ mod tests {
                 tool.name
             );
         }
+    }
+    fn vector_tool_names() -> BTreeSet<String> {
+        SqliteMcpServer::tool_router()
+            .list_all()
+            .into_iter()
+            .filter(|tool| tool.name.starts_with("vector_"))
+            .map(|tool| tool.name.to_string())
+            .collect()
+    }
+
+    #[cfg(not(feature = "vector"))]
+    #[test]
+    fn vector_tools_are_absent_without_vector_feature() {
+        for name in [
+            "vector_collection_create",
+            "vector_collection_list",
+            "vector_status",
+            "vector_upsert",
+            "vector_search",
+        ] {
+            assert!(
+                !vector_tool_names().contains(name),
+                "{name} must not be published without the vector feature"
+            );
+        }
+    }
+
+    #[cfg(feature = "vector")]
+    #[test]
+    fn vector_tools_are_exactly_the_enabled_vector_tools() {
+        let expected = [
+            "vector_collection_create",
+            "vector_collection_list",
+            "vector_status",
+            "vector_upsert",
+            "vector_search",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+
+        assert_eq!(vector_tool_names(), expected);
     }
 
     #[test]
